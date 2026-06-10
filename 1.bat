@@ -4,3 +4,7 @@ node src\index.js detailLinkClassAll 987
 node src\index.js detailLinkClassAll 8257
 node src\index.js detailLinkClassAll 2551
 
+# 2
+# node src\index.js detailLinkClassAll 170
+# node src\index.js detailLinkClassAll 798
+# node src\index.js detailLinkClassAll 1

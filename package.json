@@ -6,7 +6,10 @@
     "start": "node src/index.js",
     "list": "node src/index.js list",
     "detail": "node src/index.js detail",
-    "sync": "node src/index.js list 1 25"
+    "sync": "node src/index.js list 1 25",
+    "authors:list": "node src/index.js authorList",
+    "authors:detail": "node src/index.js authorDetail",
+    "authors:sync": "node src/index.js authorSyncAll"
   },
   "dependencies": {
     "cheerio": "^1.2.0",

@@ -4,7 +4,7 @@ import { MongoClient } from "mongodb";
 dotenv.config();
 
 const DATABASE_NAME = "Reading";
-const COLLECTION_NAME = "books";
+const DEFAULT_COLLECTION_NAME = "books";
 
 function buildMongoUri() {
   const addr = String(process.env.MONGODB_ADDR ?? "").trim();
@@ -28,13 +28,13 @@ function buildMongoUri() {
 
 let clientPromise;
 
-export async function getCollection() {
+export async function getCollection(collectionName = DEFAULT_COLLECTION_NAME) {
   if (!clientPromise) {
     clientPromise = MongoClient.connect(buildMongoUri());
   }
 
   const client = await clientPromise;
-  return client.db(DATABASE_NAME).collection(COLLECTION_NAME);
+  return client.db(DATABASE_NAME).collection(collectionName);
 }
 
 export async function closeMongo() {
