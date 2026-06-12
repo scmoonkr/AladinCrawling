@@ -4,6 +4,7 @@ import vm from "node:vm";
 import { fetchBookDetail, fetchBookList, fetchNewBookList } from "./aladin.js";
 import { closeMongo, getCollection } from "./db.js";
 import { fetchAuthorDetail, fetchAuthorListPage, getAuthorAlphabets, getAuthorCategoryTypes } from "./authors.js";
+import { fetchCallNumberByIsbn } from "./read365.js";
 import { saveAuthorDetail, saveAuthorList } from "./author-store.js";
 import { saveBookDetail, saveBookList } from "./store.js";
 
@@ -638,6 +639,14 @@ async function runAuthorDetailCommand(limit = 5000, skip = 0) {
   };
 }
 
+async function runRead365Command(isbn) {
+  if (!isbn) {
+    throw new Error("Usage: node src/index.js read365 <isbn>");
+  }
+
+  return fetchCallNumberByIsbn(isbn);
+}
+
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
@@ -703,6 +712,14 @@ async function handleApiRequest(request, response) {
       const itemId = searchParams.get("itemId");
       const url = searchParams.get("url");
       const payload = await runDetailCommand(itemId, url);
+      sendJson(response, 200, payload);
+      return;
+    }
+
+    const read365Match = pathname.match(/^\/api\/read365\/([^/]+)$/);
+    if (read365Match) {
+      const isbn = decodeURIComponent(read365Match[1] ?? "");
+      const payload = await runRead365Command(isbn);
       sendJson(response, 200, payload);
       return;
     }
@@ -797,7 +814,7 @@ async function handleApiRequest(request, response) {
 
     sendJson(response, 404, {
       error: "Not found.",
-      routes: ["GET /api/list", "GET /api/listAll", "GET /api/new", "GET /api/detail", "GET /api/detailCategory", "GET /api/detailLinkClass", "GET /api/detailLinkClassAll", "GET /api/listCategory", "GET /api/listCategoryAll", "GET /api/authors/list", "GET /api/authors/alphabet", "GET /api/authors/syncAll", "GET /api/authors/detail", "GET /api/authors/detailPending", "GET /api/authors/detailById"]
+      routes: ["GET /api/list", "GET /api/listAll", "GET /api/new", "GET /api/detail", "GET /api/read365/:isbn", "GET /api/detailCategory", "GET /api/detailLinkClass", "GET /api/detailLinkClassAll", "GET /api/listCategory", "GET /api/listCategoryAll", "GET /api/authors/list", "GET /api/authors/alphabet", "GET /api/authors/syncAll", "GET /api/authors/detail", "GET /api/authors/detailPending", "GET /api/authors/detailById"]
     });
   } catch (error) {
     sendJson(response, 500, {
@@ -816,7 +833,7 @@ function startServer() {
     console.log(JSON.stringify({
       server: true,
       port,
-      routes: ["GET /api/list", "GET /api/listAll", "GET /api/new", "GET /api/detail", "GET /api/detailCategory", "GET /api/detailLinkClass", "GET /api/detailLinkClassAll", "GET /api/listCategory", "GET /api/listCategoryAll", "GET /api/authors/list", "GET /api/authors/alphabet", "GET /api/authors/syncAll", "GET /api/authors/detail", "GET /api/authors/detailPending", "GET /api/authors/detailById"]
+      routes: ["GET /api/list", "GET /api/listAll", "GET /api/new", "GET /api/detail", "GET /api/read365/:isbn", "GET /api/detailCategory", "GET /api/detailLinkClass", "GET /api/detailLinkClassAll", "GET /api/listCategory", "GET /api/listCategoryAll", "GET /api/authors/list", "GET /api/authors/alphabet", "GET /api/authors/syncAll", "GET /api/authors/detail", "GET /api/authors/detailPending", "GET /api/authors/detailById"]
     }, null, 2));
   });
 
@@ -863,6 +880,13 @@ async function main() {
   if (command === "detail") {
     const itemId = process.argv[3];
     const payload = await runDetailCommand(itemId, null);
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (command === "read365") {
+    const isbn = process.argv[3];
+    const payload = await runRead365Command(isbn);
     console.log(JSON.stringify(payload, null, 2));
     return;
   }
