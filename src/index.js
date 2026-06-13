@@ -5,6 +5,7 @@ import { fetchBookDetail, fetchBookList, fetchNewBookList } from "./aladin.js";
 import { closeMongo, getCollection } from "./db.js";
 import { fetchAuthorDetail, fetchAuthorListPage, getAuthorAlphabets, getAuthorCategoryTypes } from "./authors.js";
 import { fetchCallNumberByIsbn } from "./read365.js";
+import { crawlNlcyByKdc, crawlNlcyNew, fetchNlcyDetail, fetchNlcyList, saveNlcyDetail } from "./nlcy.js";
 import { saveAuthorDetail, saveAuthorList } from "./author-store.js";
 import { saveBookDetail, saveBookList } from "./store.js";
 
@@ -639,6 +640,105 @@ async function runAuthorDetailCommand(limit = 5000, skip = 0) {
   };
 }
 
+async function runNlcyListCommand(kdc, page = 1, pageSize = 100) {
+  if (!kdc) {
+    throw new Error("Usage: node src/index.js nlcyList <kdc> [page] [pageSize]");
+  }
+
+  return fetchNlcyList({ kdc, page, pageSize });
+}
+
+async function runNlcyCrawlCommand(kdc, pageSize = 100, maxPages = Infinity) {
+  if (!kdc) {
+    throw new Error("Usage: node src/index.js nlcyCrawl <kdc> [pageSize] [maxPages]");
+  }
+
+  return crawlNlcyByKdc(kdc, { pageSize, maxPages });
+}
+
+async function runNlcyNewCommand(yyyymm, pageSize = 100, maxPages = Infinity) {
+  if (!yyyymm) {
+    throw new Error("Usage: node src/index.js nlcyNew <yyyymm> [pageSize] [maxPages]");
+  }
+
+  return crawlNlcyNew(yyyymm, { pageSize, maxPages });
+}
+
+async function runNlcyDetailCommand(viewKey, viewType = "AH1") {
+  if (!viewKey) {
+    throw new Error("Usage: node src/index.js nlcyDetail <viewKey> [viewType]");
+  }
+
+  const detail = await fetchNlcyDetail({ viewKey, viewType });
+  const result = await saveNlcyDetail(detail);
+
+  return {
+    command: "nlcyDetail",
+    db: {
+      matchedCount: result.matchedCount ?? 0,
+      modifiedCount: result.modifiedCount ?? 0,
+      upsertedCount: result.upsertedCount ?? 0,
+      upsertedId: result.upsertedId ?? null
+    },
+    detail
+  };
+}
+
+async function runNlcyDetailAllCommand(limit = 5000, skip = 0) {
+  const collection = await getCollection("nlcy");
+  const targets = await collection.find(
+    {
+      viewKey: { $exists: true },
+      marc_updated_at: { $exists: false }
+    },
+    {
+      projection: {
+        _id: 1,
+        viewKey: 1,
+        viewType: 1,
+        title: 1
+      }
+    }
+  )
+    .sort({ created_at: 1 })
+    .skip(skip)
+    .limit(limit)
+    .toArray();
+
+  const processed = [];
+  const failed = [];
+  let count = 1;
+
+  for (const target of targets) {
+    try {
+      console.log("nlcy:detail", target.viewKey, `: ${count++} / ${targets.length}`);
+      const detail = await fetchNlcyDetail({
+        viewKey: target.viewKey,
+        viewType: target.viewType || "AH1"
+      });
+      await saveNlcyDetail(detail);
+      processed.push({ viewKey: target.viewKey, title: target.title ?? "", tags: detail.tags.length });
+    } catch (error) {
+      failed.push({
+        viewKey: target.viewKey ?? null,
+        title: target.title ?? "",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  return {
+    command: "nlcyDetailAll",
+    skip,
+    limit,
+    matched_count: targets.length,
+    processed_count: processed.length,
+    failed_count: failed.length,
+    processed,
+    failed
+  };
+}
+
 async function runRead365Command(isbn) {
   if (!isbn) {
     throw new Error("Usage: node src/index.js read365 <isbn>");
@@ -712,6 +812,53 @@ async function handleApiRequest(request, response) {
       const itemId = searchParams.get("itemId");
       const url = searchParams.get("url");
       const payload = await runDetailCommand(itemId, url);
+      sendJson(response, 200, payload);
+      return;
+    }
+
+    const nlcyListMatch = pathname.match(/^\/api\/nlcy_list\/([^/]+)$/);
+    if (nlcyListMatch) {
+      const kdc = decodeURIComponent(nlcyListMatch[1] ?? "");
+      const page = parsePositiveInt(searchParams.get("page") || searchParams.get("pageNum"), 1);
+      const pageSize = parsePositiveInt(searchParams.get("pageSize"), 100);
+      const payload = await runNlcyListCommand(kdc, page, pageSize);
+      sendJson(response, 200, payload);
+      return;
+    }
+
+    const nlcyCrawlMatch = pathname.match(/^\/api\/nlcy_crawl\/([^/]+)$/);
+    if (nlcyCrawlMatch) {
+      const kdc = decodeURIComponent(nlcyCrawlMatch[1] ?? "");
+      const pageSize = parsePositiveInt(searchParams.get("pageSize"), 100);
+      const maxPages = parsePositiveInt(searchParams.get("maxPages"), Infinity);
+      const payload = await runNlcyCrawlCommand(kdc, pageSize, maxPages);
+      sendJson(response, 200, payload);
+      return;
+    }
+
+    if (pathname === "/api/nlcy_detail_all") {
+      const limit = parsePositiveInt(searchParams.get("limit"), 5000);
+      const skip = parseNonNegativeInt(searchParams.get("skip"), 0);
+      const payload = await runNlcyDetailAllCommand(limit, skip);
+      sendJson(response, 200, payload);
+      return;
+    }
+
+    const nlcyNewMatch = pathname.match(/^\/api\/nlcy_new\/([^/]+)$/);
+    if (nlcyNewMatch) {
+      const yyyymm = decodeURIComponent(nlcyNewMatch[1] ?? "");
+      const pageSize = parsePositiveInt(searchParams.get("pageSize"), 100);
+      const maxPages = parsePositiveInt(searchParams.get("maxPages"), Infinity);
+      const payload = await runNlcyNewCommand(yyyymm, pageSize, maxPages);
+      sendJson(response, 200, payload);
+      return;
+    }
+
+    const nlcyDetailMatch = pathname.match(/^\/api\/nlcy_detail\/([^/]+)$/);
+    if (nlcyDetailMatch) {
+      const viewKey = decodeURIComponent(nlcyDetailMatch[1] ?? "");
+      const viewType = searchParams.get("viewType") || "AH1";
+      const payload = await runNlcyDetailCommand(viewKey, viewType);
       sendJson(response, 200, payload);
       return;
     }
@@ -814,7 +961,7 @@ async function handleApiRequest(request, response) {
 
     sendJson(response, 404, {
       error: "Not found.",
-      routes: ["GET /api/list", "GET /api/listAll", "GET /api/new", "GET /api/detail", "GET /api/read365/:isbn", "GET /api/detailCategory", "GET /api/detailLinkClass", "GET /api/detailLinkClassAll", "GET /api/listCategory", "GET /api/listCategoryAll", "GET /api/authors/list", "GET /api/authors/alphabet", "GET /api/authors/syncAll", "GET /api/authors/detail", "GET /api/authors/detailPending", "GET /api/authors/detailById"]
+      routes: ["GET /api/list", "GET /api/listAll", "GET /api/new", "GET /api/detail", "GET /api/nlcy_list/:kdc", "GET /api/nlcy_crawl/:kdc", "GET /api/nlcy_new/:yyyymm", "GET /api/nlcy_detail/:viewKey", "GET /api/nlcy_detail_all", "GET /api/read365/:isbn", "GET /api/detailCategory", "GET /api/detailLinkClass", "GET /api/detailLinkClassAll", "GET /api/listCategory", "GET /api/listCategoryAll", "GET /api/authors/list", "GET /api/authors/alphabet", "GET /api/authors/syncAll", "GET /api/authors/detail", "GET /api/authors/detailPending", "GET /api/authors/detailById"]
     });
   } catch (error) {
     sendJson(response, 500, {
@@ -833,7 +980,7 @@ function startServer() {
     console.log(JSON.stringify({
       server: true,
       port,
-      routes: ["GET /api/list", "GET /api/listAll", "GET /api/new", "GET /api/detail", "GET /api/read365/:isbn", "GET /api/detailCategory", "GET /api/detailLinkClass", "GET /api/detailLinkClassAll", "GET /api/listCategory", "GET /api/listCategoryAll", "GET /api/authors/list", "GET /api/authors/alphabet", "GET /api/authors/syncAll", "GET /api/authors/detail", "GET /api/authors/detailPending", "GET /api/authors/detailById"]
+      routes: ["GET /api/list", "GET /api/listAll", "GET /api/new", "GET /api/detail", "GET /api/nlcy_list/:kdc", "GET /api/nlcy_crawl/:kdc", "GET /api/nlcy_new/:yyyymm", "GET /api/nlcy_detail/:viewKey", "GET /api/nlcy_detail_all", "GET /api/read365/:isbn", "GET /api/detailCategory", "GET /api/detailLinkClass", "GET /api/detailLinkClassAll", "GET /api/listCategory", "GET /api/listCategoryAll", "GET /api/authors/list", "GET /api/authors/alphabet", "GET /api/authors/syncAll", "GET /api/authors/detail", "GET /api/authors/detailPending", "GET /api/authors/detailById"]
     }, null, 2));
   });
 
@@ -884,9 +1031,52 @@ async function main() {
     return;
   }
 
+  if (command === "nlcyCrawl") {
+    const kdc = process.argv[3];
+    const pageSize = parsePositiveInt(process.argv[4], 100);
+    const maxPages = parsePositiveInt(process.argv[5], Infinity);
+    const payload = await runNlcyCrawlCommand(kdc, pageSize, maxPages);
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (command === "nlcyNew") {
+    const yyyymm = process.argv[3];
+    const pageSize = parsePositiveInt(process.argv[4], 100);
+    const maxPages = parsePositiveInt(process.argv[5], Infinity);
+    const payload = await runNlcyNewCommand(yyyymm, pageSize, maxPages);
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (command === "nlcyDetail") {
+    const viewKey = process.argv[3];
+    const viewType = process.argv[4] || "AH1";
+    const payload = await runNlcyDetailCommand(viewKey, viewType);
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (command === "nlcyDetailAll") {
+    const limit = parsePositiveInt(process.argv[3], 5000);
+    const skip = parseNonNegativeInt(process.argv[4], 0);
+    const payload = await runNlcyDetailAllCommand(limit, skip);
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
   if (command === "read365") {
     const isbn = process.argv[3];
     const payload = await runRead365Command(isbn);
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (command === "nlcyList") {
+    const kdc = process.argv[3];
+    const page = parsePositiveInt(process.argv[4], 1);
+    const pageSize = parsePositiveInt(process.argv[5], 100);
+    const payload = await runNlcyListCommand(kdc, page, pageSize);
     console.log(JSON.stringify(payload, null, 2));
     return;
   }
