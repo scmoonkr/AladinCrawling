@@ -14,13 +14,18 @@ node src/index.js nlcyDetailAll 10000 0
 node src/index.js nlcyNew 202606
 
 #############################################################
+# 독서로 KDC
+#############################################################
+node src/index.js read365 <isbn>
+
+#############################################################
 # ALADIN
 #############################################################
-# author list
+# book list
 node src/index.js listCategoryAll 1230 10 
 
 # detail
-node src\index.js detailLinkClassAll 2551
+node src\index.js detailLinkClassAll 1 5000
 
 # author list
 node src/index.js authorList 1 1
