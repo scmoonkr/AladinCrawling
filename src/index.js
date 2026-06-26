@@ -1,7 +1,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import vm from "node:vm";
-import { fetchBookDetail, fetchBookList, fetchNewBookList } from "./aladin.js";
+import { BlockedDetailError, fetchBookDetail, fetchBookList, fetchNewBookList } from "./aladin.js";
 import { closeMongo, getCollection } from "./db.js";
 import { fetchAuthorDetail, fetchAuthorListPage, getAuthorAlphabets, getAuthorCategoryTypes } from "./authors.js";
 import { fetchCallNumberByIsbn } from "./read365.js";
@@ -245,6 +245,23 @@ async function markDetailUpdated(filter) {
   });
 }
 
+// 성인도서(19세)/비공개 상품은 본문을 받을 수 없으므로 빈 데이터로 저장하지 않고
+// 플래그(is_adult / is_private)만 찍어 이후 상세 수집 대상에서 제외(건너뛰기)한다.
+async function markBlockedDetail(filter, reason) {
+  const collection = await getCollection();
+  const now = new Date();
+  const field = reason === "private" ? "is_private" : "is_adult";
+
+  await collection.updateOne(filter, {
+    $set: {
+      updated_at: now,
+      [field]: true,
+      blocked_reason: reason,
+      blocked_checked_at: now
+    }
+  });
+}
+
 async function runDetailLinkClassCommand(linkClass, limit = 5000, skip = 0) {
   if (!linkClass) {
     throw new Error("Usage: node src/index.js detailLinkClass <linkClass> [limit] [skip]");
@@ -253,7 +270,9 @@ async function runDetailLinkClassCommand(linkClass, limit = 5000, skip = 0) {
   const collection = await getCollection();
   const query = {
     linkClass: String(linkClass),
-    detail_updated_at: { $exists: false }
+    detail_updated_at: { $exists: false },
+    is_adult: { $ne: true },
+    is_private: { $ne: true }
   };
   const targets = await collection.find(
     query,
@@ -274,6 +293,7 @@ async function runDetailLinkClassCommand(linkClass, limit = 5000, skip = 0) {
 
   const processed = [];
   const failed = [];
+  const skippedBlocked = [];
 
   let count = 1;
   for (const target of targets) {
@@ -288,6 +308,19 @@ async function runDetailLinkClassCommand(linkClass, limit = 5000, skip = 0) {
         linkClass: target.linkClass ?? null
       });
     } catch (error) {
+      if (error instanceof BlockedDetailError) {
+        await markBlockedDetail({ _id: target._id }, error.reason);
+        const label = error.reason === "private" ? "비공개 상품" : "성인도서(19세)";
+        console.log(linkClass, "item_id:", target.item_id, `: ${label} → ${error.reason} 플래그 후 건너뜀`);
+        skippedBlocked.push({
+          item_id: target.item_id ?? null,
+          title: target.title ?? "",
+          url: target.url ?? "",
+          linkClass: target.linkClass ?? null,
+          reason: error.reason
+        });
+        continue;
+      }
       failed.push({
         item_id: target.item_id ?? null,
         title: target.title ?? "",
@@ -306,8 +339,10 @@ async function runDetailLinkClassCommand(linkClass, limit = 5000, skip = 0) {
     matched_count: targets.length,
     processed_count: processed.length,
     failed_count: failed.length,
+    skipped_blocked_count: skippedBlocked.length,
     processed,
-    failed
+    failed,
+    skipped_blocked: skippedBlocked
   };
 }
 
@@ -315,7 +350,9 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
   const collection = await getCollection();
   const targets = await collection.find(
     {
-      detail_updated_at: { $exists: false }
+      detail_updated_at: { $exists: false },
+      is_adult: { $ne: true },
+      is_private: { $ne: true }
     },
     {
       projection: {
@@ -334,6 +371,7 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
 
   const processed = [];
   const failed = [];
+  const skippedBlocked = [];
   let count = 1;
 
   for (const target of targets) {
@@ -348,6 +386,19 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
         linkClass: target.linkClass ?? null
       });
     } catch (error) {
+      if (error instanceof BlockedDetailError) {
+        await markBlockedDetail({ _id: target._id }, error.reason);
+        const label = error.reason === "private" ? "비공개 상품" : "성인도서(19세)";
+        console.log("ALL", "item_id:", target.item_id, `: ${label} → ${error.reason} 플래그 후 건너뜀`);
+        skippedBlocked.push({
+          item_id: target.item_id ?? null,
+          title: target.title ?? "",
+          url: target.url ?? "",
+          linkClass: target.linkClass ?? null,
+          reason: error.reason
+        });
+        continue;
+      }
       failed.push({
         item_id: target.item_id ?? null,
         title: target.title ?? "",
@@ -365,8 +416,10 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
     matched_count: targets.length,
     processed_count: processed.length,
     failed_count: failed.length,
+    skipped_blocked_count: skippedBlocked.length,
     processed,
-    failed
+    failed,
+    skipped_blocked: skippedBlocked
   };
 }
 
@@ -380,7 +433,9 @@ async function runDetailCategoryCommand(category) {
   const targets = await collection.find(
     {
       categories: { $elemMatch: { $regex: regex } },
-      detail_updated_at: { $exists: false }
+      detail_updated_at: { $exists: false },
+      is_adult: { $ne: true },
+      is_private: { $ne: true }
     },
     {
       projection: {

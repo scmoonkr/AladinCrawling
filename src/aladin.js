@@ -27,6 +27,23 @@ function htmlToText(value) {
   );
 }
 
+// decodeURIComponent는 잘못된 % 시퀀스(예: HTML 속 "width=100%;")를 만나면 "URI malformed"로
+// 전체가 throw된다. 유효한 퍼센트 인코딩 구간만 디코딩하고(멀티바이트 UTF-8 보존) 나머지는 그대로 둔다.
+function safeDecodeURIComponent(value) {
+  const str = String(value ?? "");
+  try {
+    return decodeURIComponent(str);
+  } catch {
+    return str.replace(/(?:%[0-9a-fA-F]{2})+/g, (seq) => {
+      try {
+        return decodeURIComponent(seq);
+      } catch {
+        return seq;
+      }
+    });
+  }
+}
+
 function cleanDetailText(text) {
   return normalizeText(
     String(text ?? "")
@@ -276,6 +293,35 @@ async function fetchHtml(url) {
   return response.text();
 }
 
+// 상세페이지를 정상 수집할 수 없는 차단 상태. reason: "adult"(성인도서 19세) | "private"(비공개)
+export class BlockedDetailError extends Error {
+  constructor(reason, detailUrl) {
+    super("Blocked detail (" + reason + "): " + detailUrl);
+    this.name = "BlockedDetailError";
+    this.isBlocked = true;
+    this.reason = reason;
+    this.url = detailUrl;
+  }
+}
+
+// 비로그인/비공개 상태에서 상세페이지를 요청하면 알라딘은 정상 페이지(수백 KB) 대신
+// confirm()/alert() + 리다이렉트만 담긴 수백 바이트짜리 스텁(HTTP 200)을 돌려준다.
+//   - 성인도서(19세): confirm('19세 이상만...') + isAdult=1
+//   - 비공개 상품:     alert('비공개 상태입니다.')
+function detectBlockReason(html) {
+  const text = String(html ?? "");
+  if (text.length > 4000) {
+    return null;
+  }
+  if (/confirm\(['"]19/.test(text) || /isAdult=1/.test(text)) {
+    return "adult";
+  }
+  if (/비공개 상태입니다/.test(text)) {
+    return "private";
+  }
+  return null;
+}
+
 async function fetchListItemCategories(detailUrl) {
   try {
     const html = await fetchHtml(detailUrl);
@@ -324,7 +370,7 @@ async function fetchInsideContent(itemId) {
   }
 
   const phrases = Array.isArray(payload?.List)
-    ? payload.List.map((item) => decodeURIComponent(item?.PhraseAll || item?.Phrase || "").trim()).filter(Boolean)
+    ? payload.List.map((item) => safeDecodeURIComponent(item?.PhraseAll || item?.Phrase || "").trim()).filter(Boolean)
     : [];
 
   return cleanDetailText(phrases.join("\n\n"));
@@ -518,6 +564,12 @@ export async function fetchBookDetail(input) {
   }
 
   const html = await fetchHtml(detailUrl);
+
+  const blockReason = detectBlockReason(html);
+  if (blockReason) {
+    throw new BlockedDetailError(blockReason, detailUrl);
+  }
+
   const $ = cheerio.load(html);
   const jsonLd = parseJsonLd($);
   const basicInfo = parseBasicInfo($);
