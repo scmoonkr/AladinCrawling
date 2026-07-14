@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
+    "myranking": "node src/myranking.js",
+    "myranking:server": "node src/myranking-server.js",
     "list": "node src/index.js list",
     "detail": "node src/index.js detail",
     "sync": "node src/index.js list 1 25",
@@ -12,9 +14,11 @@
     "authors:sync": "node src/index.js authorSyncAll"
   },
   "dependencies": {
+    "@tesseract.js-data/eng": "^1.0.0",
     "cheerio": "^1.2.0",
     "dotenv": "^17.3.1",
     "mongodb": "^7.1.1",
-    "playwright": "^1.59.0"
+    "playwright": "^1.59.0",
+    "tesseract.js": "^7.0.0"
   }
 }
