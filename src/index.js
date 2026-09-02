@@ -1,22 +1,15 @@
 import http from "node:http";
-import fs from "node:fs";
-import vm from "node:vm";
-import { BlockedDetailError, fetchBookDetail, fetchBookList, fetchNewBookList } from "./aladin.js";
+import { BlockedDetailError, ensureBrowsersInstalled, fetchBookDetail, fetchBookList, fetchNewBookList } from "./aladin.js";
 import { closeMongo, getCollection } from "./db.js";
 import { fetchAuthorDetail, fetchAuthorListPage, getAuthorAlphabets, getAuthorCategoryTypes } from "./authors.js";
 import { fetchCallNumberByIsbn } from "./read365.js";
 import { crawlNlcyByKdc, crawlNlcyNew, fetchNlcyDetail, fetchNlcyList, saveNlcyDetail } from "./nlcy.js";
 import { saveAuthorDetail, saveAuthorList } from "./author-store.js";
 import { saveBookDetail, saveBookList } from "./store.js";
+import { Aladin as AladinCategoryList } from "./category.js";
 
-function loadCategoryData() {
-  const source = fs.readFileSync(new URL("./category.js", import.meta.url), "utf8");
-  const sandbox = { exports: {} };
-  vm.runInNewContext(source, sandbox);
-  return sandbox.exports.Aladin ?? { category: [] };
-}
-
-const Aladin = loadCategoryData();
+// category.js는 최상위 카테고리 배열(Aladin)을 export한다. 기존 코드가 기대하는 { category: [...] } 형태로 감싼다.
+const Aladin = { category: Array.isArray(AladinCategoryList) ? AladinCategoryList : (AladinCategoryList?.category ?? []) };
 
 function parsePositiveInt(value, fallback) {
   const parsed = Number(value);
@@ -114,7 +107,16 @@ async function runListAllCommand(CID, pageCount) {
   };
 
   for (let page = 1; page <= pageCount; page += 1) {
-    const data = await fetchBookList({ CID, page, pageSize: 50 });
+    let data;
+    try {
+      data = await fetchBookList({ CID, page, pageSize: 50 });
+    } catch (error) {
+      // 재시도 후에도 실패하면 이 카테고리는 중단하고 다음 카테고리로 넘어간다(전체 크롤 중단 방지).
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`목록 수집 실패 CID=${CID} page=${page}: ${message}`);
+      pages.push({ page, saved_count: 0, error: message });
+      break;
+    }
     console.log(CID, page, data.items.length);
 
     if (data.items.length === 0) {
@@ -267,6 +269,7 @@ async function runDetailLinkClassCommand(linkClass, limit = 5000, skip = 0) {
     throw new Error("Usage: node src/index.js detailLinkClass <linkClass> [limit] [skip]");
   }
 
+  await ensureBrowsersInstalled();
   const collection = await getCollection();
   const query = {
     linkClass: String(linkClass),
@@ -347,6 +350,7 @@ async function runDetailLinkClassCommand(linkClass, limit = 5000, skip = 0) {
 }
 
 async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
+  await ensureBrowsersInstalled();
   const collection = await getCollection();
   const targets = await collection.find(
     {

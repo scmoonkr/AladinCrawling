@@ -102,9 +102,27 @@ function parseJsonLd($) {
   return null;
 }
 
+// 저자 문자열의 역할 표기를 정리한다. 괄호는 제거하고, 일부 역할은 짧은 표기로 치환한다.
+//   (지은이)->지음, (옮긴이)->옮김, (그린이)->그림, (그림)->그림, (감수)->감수 등(그 외는 괄호만 제거)
+const AUTHOR_ROLE_MAP = {
+  "지은이": "지음",
+  "옮긴이": "옮김",
+  "그린이": "그림"
+};
+
+function normalizeAuthorRoles(author) {
+  return normalizeText(
+    String(author ?? "").replace(/\s*\(([^)]*)\)/g, (match, role) => {
+      const key = normalizeText(role);
+      const mapped = AUTHOR_ROLE_MAP[key] ?? key; // 매핑이 없으면 단어는 유지하고 괄호만 제거
+      return mapped ? ` ${mapped}` : "";
+    })
+  );
+}
+
 function parseListMetaParts(metaParts) {
   const cleaned = (metaParts || []).map((part) => normalizeText(part)).filter(Boolean);
-  const author = cleaned[0] ?? "";
+  const author = normalizeAuthorRoles(cleaned[0] ?? "");
   let publisher = "";
   let pubDate = "";
 
@@ -282,15 +300,42 @@ function parseCardReviewImages($) {
   return [...new Set(urls)];
 }
 
-async function fetchHtml(url) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-  const response = await fetch(url, { headers: DEFAULT_HEADERS });
+// 일시적으로 재시도할 가치가 있는 상태코드 (과부하/속도 제한 등)
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
-  if (!response.ok) {
-    throw new Error("Failed to fetch " + url + " (" + response.status + ")");
+async function fetchHtml(url, { retries = 4, baseDelayMs = 1000 } = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(url, { headers: DEFAULT_HEADERS });
+    } catch (error) {
+      // 네트워크 오류는 재시도 대상
+      if (attempt >= retries) {
+        throw error;
+      }
+      const delay = baseDelayMs * 2 ** attempt;
+      console.warn(`fetch 재시도 ${attempt + 1}/${retries} (network: ${error.message}, ${delay}ms 대기): ${url}`);
+      await sleep(delay);
+      continue;
+    }
+
+    if (response.ok) {
+      return response.text();
+    }
+
+    // 404 등 영구 오류는 즉시 실패, 재시도 가능한 상태코드만 백오프 후 재시도
+    if (!RETRYABLE_STATUS.has(response.status) || attempt >= retries) {
+      throw new Error("Failed to fetch " + url + " (" + response.status + ")");
+    }
+
+    const delay = baseDelayMs * 2 ** attempt;
+    console.warn(`fetch 재시도 ${attempt + 1}/${retries} (HTTP ${response.status}, ${delay}ms 대기): ${url}`);
+    await sleep(delay);
   }
-
-  return response.text();
 }
 
 // 상세페이지를 정상 수집할 수 없는 차단 상태. reason: "adult"(성인도서 19세) | "private"(비공개)
@@ -374,6 +419,32 @@ async function fetchInsideContent(itemId) {
     : [];
 
   return cleanDetailText(phrases.join("\n\n"));
+}
+
+// Playwright 브라우저(Chromium) 미설치로 인한 실행 실패인지 판별한다.
+// 이 경우는 재시도/부분저장으로 넘기지 않고 즉시 중단시켜 설치를 안내한다.
+function isBrowserMissingError(error) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /Executable doesn't exist|playwright install|chrome-headless-shell|browserType\.launch/i.test(message);
+}
+
+// 상세 수집은 동적 섹션 로딩에 Chromium이 필요하다. 배치 시작 전에 한 번 실행 가능 여부를
+// 확인해, 미설치 시 명확한 안내와 함께 즉시 실패시킨다(항목마다 반복 실패 방지).
+export async function ensureBrowsersInstalled() {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    if (isBrowserMissingError(error)) {
+      throw new Error(
+        "Playwright Chromium 브라우저가 설치되어 있지 않습니다. 상세 크롤링을 실행하려면 먼저 다음을 실행하세요:\n" +
+        "    npx playwright install chromium chromium-headless-shell"
+      );
+    }
+    throw error;
+  } finally {
+    if (browser) await browser.close();
+  }
 }
 
 async function fetchDynamicSections(detailUrl, productIsbn) {
@@ -582,7 +653,19 @@ export async function fetchBookDetail(input) {
   const isbn = basicInfo.isbn || readMeta($, 'meta[property="books:isbn"]') || readMeta($, 'meta[property="og:barcode"]');
   const productIsbn = $(".hd_ISBN").attr("value") || isbn;
   const fallbackImages = parseCardReviewImages($);
-  const sections = await fetchDynamicSections(detailUrl, productIsbn);
+  let sections;
+  try {
+    sections = await fetchDynamicSections(detailUrl, productIsbn);
+  } catch (error) {
+    // 브라우저 미설치는 치명적 → 상위에서 중단시킨다.
+    if (isBrowserMissingError(error)) {
+      throw error;
+    }
+    // 일시적 실패(페이지 크래시/타임아웃 등)는 정적 필드(isbn/page/size/weight 등)라도
+    // 저장되도록 빈 섹션으로 대체하고 경고만 남긴다.
+    console.warn(`동적 섹션 수집 실패 (item ${itemId}) → 정적 필드만 저장: ${error instanceof Error ? error.message : error}`);
+    sections = {};
+  }
   const dynamic = parseDynamicDetails(sections, fallbackImages);
   const insideContent = await fetchInsideContent(itemId);
 
