@@ -3,6 +3,7 @@ import { BlockedDetailError, ensureBrowsersInstalled, fetchBookDetail, fetchBook
 import { closeMongo, getCollection } from "./db.js";
 import { fetchAuthorDetail, fetchAuthorListPage, getAuthorAlphabets, getAuthorCategoryTypes } from "./authors.js";
 import { fetchCallNumberByIsbn } from "./read365.js";
+import { closeKyoboBrowser, crawlKyoboPrice, getKyoboConcurrency } from "./kyobo.js";
 import { crawlNlcyByKdc, crawlNlcyNew, fetchNlcyDetail, fetchNlcyList, saveNlcyDetail } from "./nlcy.js";
 import { saveAuthorDetail, saveAuthorList } from "./author-store.js";
 import { saveBookDetail, saveBookList } from "./store.js";
@@ -806,6 +807,94 @@ async function runRead365Command(isbn) {
   return fetchCallNumberByIsbn(isbn);
 }
 
+async function runKyoboCommand(isbn) {
+  if (!isbn) {
+    throw new Error("Usage: node src/index.js kyobo <isbn>");
+  }
+
+  const result = await crawlKyoboPrice(isbn);
+  return { command: "kyobo", ...result };
+}
+
+async function runKyoboAllCommand(limit = 5000, skip = 0) {
+  const collection = await getCollection();
+  const targets = await collection.find(
+    {
+      isbn: { $exists: true, $nin: [null, ""] },
+      kyobo_checked_at: { $exists: false }
+    },
+    {
+      projection: {
+        _id: 1,
+        isbn: 1,
+        title: 1
+      }
+    }
+  )
+    .sort({ created_at: 1 })
+    .skip(skip)
+    .limit(limit)
+    .toArray();
+
+  const processed = [];
+  const notFound = [];
+  const failed = [];
+  const concurrency = Math.min(getKyoboConcurrency(), targets.length || 1);
+  const startedAt = Date.now();
+  let cursor = 0;
+  let done = 0;
+
+  async function worker() {
+    while (cursor < targets.length) {
+      const target = targets[cursor++];
+
+      try {
+        const result = await crawlKyoboPrice(target.isbn);
+
+        if (result.found) {
+          processed.push({
+            isbn: result.isbn,
+            title: target.title ?? "",
+            price: result.price,
+            wholesale_price: result.wholesale_price
+          });
+        } else {
+          notFound.push({ isbn: target.isbn, title: target.title ?? "" });
+        }
+
+        console.log("kyobo:price", target.isbn, `: ${++done} / ${targets.length}`, result.found ? "" : "(not found)");
+      } catch (error) {
+        failed.push({
+          isbn: target.isbn ?? null,
+          title: target.title ?? "",
+          error: error instanceof Error ? error.message : String(error)
+        });
+        console.log("kyobo:price", target.isbn, `: ${++done} / ${targets.length} (error)`);
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+  const elapsedMs = Date.now() - startedAt;
+
+  return {
+    command: "kyoboAll",
+    skip,
+    limit,
+    concurrency,
+    targetCount: targets.length,
+    processedCount: processed.length,
+    notFoundCount: notFound.length,
+    failedCount: failed.length,
+    elapsedMs,
+    msPerBook: targets.length > 0 ? Math.round(elapsedMs / targets.length) : 0,
+    processed,
+    notFound,
+    failed
+  };
+}
+
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
@@ -926,6 +1015,13 @@ async function handleApiRequest(request, response) {
     if (read365Match) {
       const isbn = decodeURIComponent(read365Match[1] ?? "");
       const payload = await runRead365Command(isbn);
+      sendJson(response, 200, payload);
+      return;
+    }
+
+    if (pathname === "/api/kyobo") {
+      const isbn = searchParams.get("isbn");
+      const payload = await runKyoboCommand(isbn);
       sendJson(response, 200, payload);
       return;
     }
@@ -1131,6 +1227,21 @@ async function main() {
     return;
   }
 
+  if (command === "kyobo") {
+    const isbn = process.argv[3];
+    const payload = await runKyoboCommand(isbn);
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (command === "kyoboAll") {
+    const limit = parsePositiveInt(process.argv[3], 5000);
+    const skip = parseNonNegativeInt(process.argv[4], 0);
+    const payload = await runKyoboAllCommand(limit, skip);
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
   if (command === "nlcyList") {
     const kdc = process.argv[3];
     const page = parsePositiveInt(process.argv[4], 1);
@@ -1242,6 +1353,7 @@ main()
   })
   .finally(async () => {
     if (process.argv[2] !== "server") {
+      await closeKyoboBrowser();
       await closeMongo();
     }
   });

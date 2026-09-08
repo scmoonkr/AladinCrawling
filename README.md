@@ -58,3 +58,30 @@ node src/index.js authorList 1 1
 
 # author detail
 node src/index.js authorDetail
+
+#############################################################
+# KYOBO (도매 가격)
+#############################################################
+# .env: KYOBO_URL, KYOBO_ID, KYOBO_PASSWORD
+# 실행 시 로그인 후 헤더 검색창에 ISBN을 입력해 정가/출고가를 읽습니다.
+# 검색 결과가 없으면 이전 목록이 화면에 남기 때문에, 행의 상품코드가 ISBN과
+# 일치하는 경우에만 결과로 인정합니다.
+# 기본은 headless 실행이며, 화면을 보려면 KYOBO_HEADLESS=false 로 실행하세요.
+# books에 저장되는 필드:
+#   price(정가), wholesale_price(출고가), supply_rate(출고율)
+#   kyobo_title, kyobo_found, kyobo_checked_at, kyobo_updated_at
+#   * price는 교보 정가로 직접 덮어씁니다.
+
+# ISBN 1건 조회 후 books 저장
+node src/index.js kyobo 9788934972464
+
+# books에서 isbn이 있고 아직 조회하지 않은(kyobo_checked_at 없음) 문서 일괄 처리
+# node src/index.js kyoboAll <limit> <skip>
+node src/index.js kyoboAll 1000 0
+
+# 서버 실행 시 API
+# http://localhost:3000/api/kyobo?isbn=9788934972464
+
+# kyobo 조회
+# limit skip
+node src/index.js kyoboAll 100 0
