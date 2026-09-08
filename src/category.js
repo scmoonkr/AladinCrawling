@@ -1,4 +1,4 @@
-exports.Aladin = {
+export const Aladin = {
   category : [
 
     { linkClass: '1230', 	name: '가정/요리/뷰티',	subCategory: [

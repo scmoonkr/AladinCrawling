@@ -3,7 +3,7 @@ import { BlockedDetailError, ensureBrowsersInstalled, fetchBookDetail, fetchBook
 import { closeMongo, getCollection } from "./db.js";
 import { fetchAuthorDetail, fetchAuthorListPage, getAuthorAlphabets, getAuthorCategoryTypes } from "./authors.js";
 import { fetchCallNumberByIsbn } from "./read365.js";
-import { closeKyoboBrowser, crawlKyoboPrice, getKyoboConcurrency } from "./kyobo.js";
+import { closeKyoboBrowser, crawlKyoboPrice, getKyoboConcurrency, KyoboRateLimitError } from "./kyobo.js";
 import { crawlNlcyByKdc, crawlNlcyNew, fetchNlcyDetail, fetchNlcyList, saveNlcyDetail } from "./nlcy.js";
 import { saveAuthorDetail, saveAuthorList } from "./author-store.js";
 import { saveBookDetail, saveBookList } from "./store.js";
@@ -843,9 +843,10 @@ async function runKyoboAllCommand(limit = 5000, skip = 0) {
   const startedAt = Date.now();
   let cursor = 0;
   let done = 0;
+  let rateLimitedMessage = "";
 
   async function worker() {
-    while (cursor < targets.length) {
+    while (cursor < targets.length && !rateLimitedMessage) {
       const target = targets[cursor++];
 
       try {
@@ -864,6 +865,13 @@ async function runKyoboAllCommand(limit = 5000, skip = 0) {
 
         console.log("kyobo:price", target.isbn, `: ${++done} / ${targets.length}`, result.found ? "" : "(not found)");
       } catch (error) {
+        // 서버가 검색을 제한하면 남은 항목을 계속 두드려봐야 소용없으므로 배치를 멈춘다.
+        if (error instanceof KyoboRateLimitError) {
+          rateLimitedMessage = error.message;
+          console.error("kyobo:price stopped -", error.message);
+          break;
+        }
+
         failed.push({
           isbn: target.isbn ?? null,
           title: target.title ?? "",
@@ -883,6 +891,7 @@ async function runKyoboAllCommand(limit = 5000, skip = 0) {
     skip,
     limit,
     concurrency,
+    stopped: rateLimitedMessage || null,
     targetCount: targets.length,
     processedCount: processed.length,
     notFoundCount: notFound.length,

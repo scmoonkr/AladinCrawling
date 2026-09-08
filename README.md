@@ -63,9 +63,15 @@ node src/index.js authorDetail
 # KYOBO (도매 가격)
 #############################################################
 # .env: KYOBO_URL, KYOBO_ID, KYOBO_PASSWORD
-# 실행 시 로그인 후 헤더 검색창에 ISBN을 입력해 정가/출고가를 읽습니다.
-# 검색 결과가 없으면 이전 목록이 화면에 남기 때문에, 행의 상품코드가 ISBN과
-# 일치하는 경우에만 결과로 인정합니다.
+# 브라우저로 로그인(프로세스당 1회)한 뒤, 그 세션 쿠키로 검색 API를 직접 호출합니다.
+#   POST /bscm/btco/findBksSrchMain.do  { dma_srch: { findName: <isbn> } }
+# 응답에는 정가(wncrPrce)와 출고율(byngRate)만 있고, 화면의 출고가는 둘을 곱한 값입니다.
+# 상품코드(cmdtCode)가 검색한 ISBN과 일치하는 행만 결과로 인정합니다.
+# KYOBO_CONCURRENCY로 동시 조회 수를 지정합니다(기본 2, 최대 4).
+#   동시 3: 977ms/권, 동시 6: 363ms/권 -- 단, 빠르게 몰아치면 서버가
+#   "시스템 과부하로 검색이 제한됩니다"(E9999)로 검색을 막습니다.
+#   이때는 재로그인해도 풀리지 않고 한동안 기다려야 하므로, 배치는 즉시 중단하고
+#   결과의 stopped 필드에 사유를 남깁니다. 남은 항목은 다음 실행에서 이어서 처리합니다.
 # 기본은 headless 실행이며, 화면을 보려면 KYOBO_HEADLESS=false 로 실행하세요.
 # books에 저장되는 필드:
 #   price(정가), wholesale_price(출고가), supply_rate(출고율)
