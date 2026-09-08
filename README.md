@@ -67,11 +67,12 @@ node src/index.js authorDetail
 #   POST /bscm/btco/findBksSrchMain.do  { dma_srch: { findName: <isbn> } }
 # 응답에는 정가(wncrPrce)와 출고율(byngRate)만 있고, 화면의 출고가는 둘을 곱한 값입니다.
 # 상품코드(cmdtCode)가 검색한 ISBN과 일치하는 행만 결과로 인정합니다.
-# KYOBO_CONCURRENCY로 동시 조회 수를 지정합니다(기본 2, 최대 4).
-#   동시 3: 977ms/권, 동시 6: 363ms/권 -- 단, 빠르게 몰아치면 서버가
-#   "시스템 과부하로 검색이 제한됩니다"(E9999)로 검색을 막습니다.
-#   이때는 재로그인해도 풀리지 않고 한동안 기다려야 하므로, 배치는 즉시 중단하고
-#   결과의 stopped 필드에 사유를 남깁니다. 남은 항목은 다음 실행에서 이어서 처리합니다.
+# 조회는 한 건씩 순차로만 보냅니다(동시 실행 없음).
+#   동시에 여러 건을 보내면 서버가 "시스템 과부하로 검색이 제한됩니다"(E9999)로
+#   검색을 막습니다. 재로그인이나 세션 교체로는 풀리지 않고 한동안 기다려야 합니다.
+#   제한이 감지되면 배치를 즉시 중단하고 결과의 stopped 필드에 사유를 남기며,
+#   처리하지 못한 항목은 그대로 남아 다음 실행에서 이어서 처리합니다.
+# KYOBO_REQUEST_INTERVAL로 요청 간 최소 간격을 조절합니다(기본 400ms).
 # 기본은 headless 실행이며, 화면을 보려면 KYOBO_HEADLESS=false 로 실행하세요.
 # books에 저장되는 필드:
 #   price(정가), wholesale_price(출고가), supply_rate(출고율)

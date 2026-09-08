@@ -3,7 +3,7 @@ import { BlockedDetailError, ensureBrowsersInstalled, fetchBookDetail, fetchBook
 import { closeMongo, getCollection } from "./db.js";
 import { fetchAuthorDetail, fetchAuthorListPage, getAuthorAlphabets, getAuthorCategoryTypes } from "./authors.js";
 import { fetchCallNumberByIsbn } from "./read365.js";
-import { closeKyoboBrowser, crawlKyoboPrice, getKyoboConcurrency, KyoboRateLimitError } from "./kyobo.js";
+import { closeKyoboBrowser, crawlKyoboPrice, KyoboRateLimitError } from "./kyobo.js";
 import { crawlNlcyByKdc, crawlNlcyNew, fetchNlcyDetail, fetchNlcyList, saveNlcyDetail } from "./nlcy.js";
 import { saveAuthorDetail, saveAuthorList } from "./author-store.js";
 import { saveBookDetail, saveBookList } from "./store.js";
@@ -839,50 +839,43 @@ async function runKyoboAllCommand(limit = 5000, skip = 0) {
   const processed = [];
   const notFound = [];
   const failed = [];
-  const concurrency = Math.min(getKyoboConcurrency(), targets.length || 1);
   const startedAt = Date.now();
-  let cursor = 0;
-  let done = 0;
   let rateLimitedMessage = "";
+  let done = 0;
 
-  async function worker() {
-    while (cursor < targets.length && !rateLimitedMessage) {
-      const target = targets[cursor++];
+  // 교보 검색은 동시에 여러 건을 보내면 서버가 검색을 막으므로 한 건씩 순차로 처리한다.
+  for (const target of targets) {
+    try {
+      const result = await crawlKyoboPrice(target.isbn);
 
-      try {
-        const result = await crawlKyoboPrice(target.isbn);
-
-        if (result.found) {
-          processed.push({
-            isbn: result.isbn,
-            title: target.title ?? "",
-            price: result.price,
-            wholesale_price: result.wholesale_price
-          });
-        } else {
-          notFound.push({ isbn: target.isbn, title: target.title ?? "" });
-        }
-
-        console.log("kyobo:price", target.isbn, `: ${++done} / ${targets.length}`, result.found ? "" : "(not found)");
-      } catch (error) {
-        // 서버가 검색을 제한하면 남은 항목을 계속 두드려봐야 소용없으므로 배치를 멈춘다.
-        if (error instanceof KyoboRateLimitError) {
-          rateLimitedMessage = error.message;
-          console.error("kyobo:price stopped -", error.message);
-          break;
-        }
-
-        failed.push({
-          isbn: target.isbn ?? null,
+      if (result.found) {
+        processed.push({
+          isbn: result.isbn,
           title: target.title ?? "",
-          error: error instanceof Error ? error.message : String(error)
+          price: result.price,
+          wholesale_price: result.wholesale_price
         });
-        console.log("kyobo:price", target.isbn, `: ${++done} / ${targets.length} (error)`);
+      } else {
+        notFound.push({ isbn: target.isbn, title: target.title ?? "" });
       }
+
+      console.log("kyobo:price", target.isbn, `: ${++done} / ${targets.length}`, result.found ? "" : "(not found)");
+    } catch (error) {
+      // 서버가 검색을 제한하면 남은 항목을 계속 두드려봐야 소용없으므로 배치를 멈춘다.
+      if (error instanceof KyoboRateLimitError) {
+        rateLimitedMessage = error.message;
+        console.error("kyobo:price stopped -", error.message);
+        break;
+      }
+
+      failed.push({
+        isbn: target.isbn ?? null,
+        title: target.title ?? "",
+        error: error instanceof Error ? error.message : String(error)
+      });
+      console.log("kyobo:price", target.isbn, `: ${++done} / ${targets.length} (error)`);
     }
   }
-
-  await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
   const elapsedMs = Date.now() - startedAt;
 
@@ -890,7 +883,6 @@ async function runKyoboAllCommand(limit = 5000, skip = 0) {
     command: "kyoboAll",
     skip,
     limit,
-    concurrency,
     stopped: rateLimitedMessage || null,
     targetCount: targets.length,
     processedCount: processed.length,

@@ -14,8 +14,7 @@ const SEARCH_API_PATH = "/bscm/btco/findBksSrchMain.do";
 const SEARCH_SUBMISSION_ID = "mf_wfm_content_sbm_findBksSrchMain";
 const SEARCH_PAGE_PATH = "/WebBscm/btco/btcoBksSrch.xml";
 const DEFAULT_TIMEOUT = 30_000;
-const DEFAULT_CONCURRENCY = 2;
-const MAX_CONCURRENCY = 4;
+const DEFAULT_REQUEST_INTERVAL = 400;
 const SEARCH_ATTEMPTS = 3;
 const RETRY_DELAY = 500;
 const RATE_LIMIT_BACKOFF = 30_000;
@@ -23,6 +22,7 @@ const RATE_LIMIT_BACKOFF = 30_000;
 let sharedContextPromise = null;
 let loginPromise = null;
 let sessionGeneration = 0;
+let nextRequestAt = 0;
 
 // 검색을 너무 몰아치면 서버가 "시스템 과부하로 검색이 제한됩니다"(E9999)를 돌려준다.
 // 재로그인으로는 풀리지 않고 시간을 두고 기다려야 하므로 별도 오류로 구분한다.
@@ -45,14 +45,10 @@ function readConfig() {
   return { url, id, password };
 }
 
-export function getKyoboConcurrency() {
-  const parsed = Number(process.env.KYOBO_CONCURRENCY);
-
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    return DEFAULT_CONCURRENCY;
-  }
-
-  return Math.min(Math.trunc(parsed), MAX_CONCURRENCY);
+// 검색은 순차로만 보낸다(동시 실행 없음). 여기에 더해 요청 사이 최소 간격을 둔다.
+function getRequestInterval() {
+  const parsed = Number(process.env.KYOBO_REQUEST_INTERVAL);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_REQUEST_INTERVAL;
 }
 
 function isHeadless() {
@@ -172,6 +168,22 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function throttle() {
+  const interval = getRequestInterval();
+
+  if (interval <= 0) {
+    return;
+  }
+
+  const now = Date.now();
+  const startAt = Math.max(now, nextRequestAt);
+  nextRequestAt = startAt + interval;
+
+  if (startAt > now) {
+    await delay(startAt - now);
+  }
+}
+
 function buildSearchPayload(isbn) {
   return {
     dma_srch: {
@@ -197,6 +209,7 @@ function buildSearchPayload(isbn) {
 }
 
 async function postSearch(context, config, isbn) {
+  await throttle();
   const origin = new URL(config.url).origin;
   const response = await context.request.post(new URL(SEARCH_API_PATH, origin).toString(), {
     headers: {
