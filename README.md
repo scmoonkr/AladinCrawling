@@ -90,7 +90,3 @@ node src/index.js kyoboAll 1000 0
 
 # 서버 실행 시 API
 # http://localhost:3000/api/kyobo?isbn=9788934972464
-
-# kyobo 조회
-# limit skip
-node src/index.js kyoboAll 100 0

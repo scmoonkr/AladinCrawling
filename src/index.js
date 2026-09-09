@@ -285,6 +285,28 @@ async function markBlockedDetail(filter, reason) {
   });
 }
 
+// 알라딘 내부코드(K로 시작)나 자리수가 모자란 값(9자 이하)은 정상 ISBN이 아니므로
+// 상세를 수집하지 않는다. 대상에서 영구 제외되도록 detail_updated_at 을 찍어둔다.
+function isSkippableIsbn(isbn) {
+  const value = String(isbn ?? "").trim();
+  return value.startsWith("K") || value.length <= 9;
+}
+
+async function markDetailSkipped(filter, reason) {
+  const collection = await getCollection();
+  const now = new Date();
+
+  await collection.updateOne(filter, {
+    $set: {
+      updated_at: now,
+      detail_updated_at: now,
+      detail_skipped: true,
+      skip_reason: reason,
+      skip_checked_at: now
+    }
+  });
+}
+
 async function runDetailLinkClassCommand(linkClass, limit = 5000, skip = 0) {
   if (!linkClass) {
     throw new Error("Usage: node src/index.js detailLinkClass <linkClass> [limit] [skip]");
@@ -303,6 +325,7 @@ async function runDetailLinkClassCommand(linkClass, limit = 5000, skip = 0) {
       projection: {
         _id: 1,
         item_id: 1,
+        isbn: 1,
         title: 1,
         url: 1,
         linkClass: 1
@@ -321,7 +344,20 @@ async function runDetailLinkClassCommand(linkClass, limit = 5000, skip = 0) {
   let count = 1;
   for (const target of targets) {
     try {
-      console.log(linkClass, "item_id:", target.item_id, `: ${count++} / ${targets.length}`);
+      const n = count++;
+      if (isSkippableIsbn(target.isbn)) {
+        await markDetailSkipped({ _id: target._id }, "invalid_isbn");
+        console.log(linkClass, "item_id:", target.item_id, `: ${n} / ${targets.length} ISBN '${target.isbn ?? ""}' → 스킵(다음에 제외)`);
+        skippedBlocked.push({
+          item_id: target.item_id ?? null,
+          title: target.title ?? "",
+          url: target.url ?? "",
+          linkClass: target.linkClass ?? null,
+          reason: "invalid_isbn"
+        });
+        continue;
+      }
+      console.log(linkClass, "item_id:", target.item_id, `: ${n} / ${targets.length}`);
       const payload = await runDetailCommand(target.item_id ?? null, target.url ?? null);
       await markDetailUpdated({ _id: target._id });
       processed.push({
@@ -381,6 +417,7 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
       projection: {
         _id: 1,
         item_id: 1,
+        isbn: 1,
         title: 1,
         url: 1,
         linkClass: 1
@@ -401,6 +438,18 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
     const n = count++;
     const startedAt = Date.now();
     try {
+      if (isSkippableIsbn(target.isbn)) {
+        await markDetailSkipped({ _id: target._id }, "invalid_isbn");
+        console.log("ALL", "item_id:", target.item_id, `: ${n} / ${targets.length} ISBN '${target.isbn ?? ""}' → 스킵(다음에 제외)`);
+        skippedBlocked.push({
+          item_id: target.item_id ?? null,
+          title: target.title ?? "",
+          url: target.url ?? "",
+          linkClass: target.linkClass ?? null,
+          reason: "invalid_isbn"
+        });
+        continue;
+      }
       const payload = await runDetailCommand(target.item_id ?? null, target.url ?? null);
       await markDetailUpdated({ _id: target._id });
       const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
