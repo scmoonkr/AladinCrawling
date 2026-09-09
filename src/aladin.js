@@ -1,5 +1,4 @@
 import * as cheerio from "cheerio";
-import { chromium } from "playwright";
 
 const ALADIN_BASE_URL = "https://www.aladin.co.kr";
 const DEFAULT_HEADERS = {
@@ -307,11 +306,11 @@ function sleep(ms) {
 // 일시적으로 재시도할 가치가 있는 상태코드 (과부하/속도 제한 등)
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
-async function fetchHtml(url, { retries = 4, baseDelayMs = 1000 } = {}) {
+async function fetchHtml(url, { retries = 4, baseDelayMs = 1000, headers } = {}) {
   for (let attempt = 0; ; attempt += 1) {
     let response;
     try {
-      response = await fetch(url, { headers: DEFAULT_HEADERS });
+      response = await fetch(url, { headers: { ...DEFAULT_HEADERS, ...headers } });
     } catch (error) {
       // 네트워크 오류는 재시도 대상
       if (attempt >= retries) {
@@ -421,55 +420,32 @@ async function fetchInsideContent(itemId) {
   return cleanDetailText(phrases.join("\n\n"));
 }
 
-// Playwright 브라우저(Chromium) 미설치로 인한 실행 실패인지 판별한다.
-// 이 경우는 재시도/부분저장으로 넘기지 않고 즉시 중단시켜 설치를 안내한다.
-function isBrowserMissingError(error) {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  return /Executable doesn't exist|playwright install|chrome-headless-shell|browserType\.launch/i.test(message);
-}
-
-// 상세 수집은 동적 섹션 로딩에 Chromium이 필요하다. 배치 시작 전에 한 번 실행 가능 여부를
-// 확인해, 미설치 시 명확한 안내와 함께 즉시 실패시킨다(항목마다 반복 실패 방지).
-export async function ensureBrowsersInstalled() {
-  let browser;
-  try {
-    browser = await chromium.launch({ headless: true });
-  } catch (error) {
-    if (isBrowserMissingError(error)) {
-      throw new Error(
-        "Playwright Chromium 브라우저가 설치되어 있지 않습니다. 상세 크롤링을 실행하려면 먼저 다음을 실행하세요:\n" +
-        "    npx playwright install chromium chromium-headless-shell"
-      );
-    }
-    throw error;
-  } finally {
-    if (browser) await browser.close();
-  }
-}
-
+// 동적 섹션(책소개/저자소개/출판사서평)은 상세페이지에서 XHR로 불러오는
+// getContents.aspx 응답이다. 예전에는 Chromium 세션이 필요하다고 보고 항목마다
+// 브라우저를 띄웠지만, 실측 결과 referer + x-requested-with 헤더만 붙이면 Node fetch로
+// 동일한 HTML을 받을 수 있어(두 헤더가 없으면 빈 응답) 브라우저를 완전히 제거했다.
 async function fetchDynamicSections(detailUrl, productIsbn) {
-  const browser = await chromium.launch({ headless: true });
-
-  try {
-    const page = await browser.newPage();
-    await page.goto(detailUrl, { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(1500);
-
-    return await page.evaluate(async ({ productIsbn }) => {
-      const names = ["Introduce", "AuthorInfo", "PublisherDesc"];
-      const results = {};
-
-      for (const name of names) {
-        const url = "/shop/product/getContents.aspx?ISBN=" + productIsbn + "&name=" + name + "&type=0&date=" + new Date().getHours();
-        const response = await fetch(url, { credentials: "include" });
-        results[name] = await response.text();
-      }
-
-      return results;
-    }, { productIsbn });
-  } finally {
-    await browser.close();
+  if (!productIsbn) {
+    return {};
   }
+
+  const headers = {
+    referer: detailUrl,
+    "x-requested-with": "XMLHttpRequest"
+  };
+  const names = ["Introduce", "AuthorInfo", "PublisherDesc"];
+  const results = {};
+
+  for (const name of names) {
+    const url = new URL("/shop/product/getContents.aspx", ALADIN_BASE_URL);
+    url.searchParams.set("ISBN", productIsbn);
+    url.searchParams.set("name", name);
+    url.searchParams.set("type", "0");
+    url.searchParams.set("date", String(new Date().getHours()));
+    results[name] = await fetchHtml(url, { headers });
+  }
+
+  return results;
 }
 
 function getBoxes(html) {
@@ -657,11 +633,7 @@ export async function fetchBookDetail(input) {
   try {
     sections = await fetchDynamicSections(detailUrl, productIsbn);
   } catch (error) {
-    // 브라우저 미설치는 치명적 → 상위에서 중단시킨다.
-    if (isBrowserMissingError(error)) {
-      throw error;
-    }
-    // 일시적 실패(페이지 크래시/타임아웃 등)는 정적 필드(isbn/page/size/weight 등)라도
+    // 일시적 실패(네트워크/타임아웃 등)는 정적 필드(isbn/page/size/weight 등)라도
     // 저장되도록 빈 섹션으로 대체하고 경고만 남긴다.
     console.warn(`동적 섹션 수집 실패 (item ${itemId}) → 정적 필드만 저장: ${error instanceof Error ? error.message : error}`);
     sections = {};

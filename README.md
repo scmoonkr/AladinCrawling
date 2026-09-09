@@ -51,8 +51,10 @@ node src/index.js read365 <isbn>
 node src/index.js listCategoryAll 1230 10 
 
 # detail
-node src\index.js detailLinkClassAll 1 5000
-
+# limit skip
+node src\index.js detailLinkClassAll 100000 0
+# crawling deail ISBN
+node src\index.js detailByIsbn 9791193904435
 # author list
 node src/index.js authorList 1 1
 

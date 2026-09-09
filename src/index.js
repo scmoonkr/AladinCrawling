@@ -1,5 +1,5 @@
 import http from "node:http";
-import { BlockedDetailError, ensureBrowsersInstalled, fetchBookDetail, fetchBookList, fetchNewBookList } from "./aladin.js";
+import { BlockedDetailError, fetchBookDetail, fetchBookList, fetchNewBookList } from "./aladin.js";
 import { closeMongo, getCollection } from "./db.js";
 import { fetchAuthorDetail, fetchAuthorListPage, getAuthorAlphabets, getAuthorCategoryTypes } from "./authors.js";
 import { fetchCallNumberByIsbn } from "./read365.js";
@@ -235,6 +235,26 @@ async function runDetailCommand(itemId, url) {
   };
 }
 
+// Aladin 상품 페이지는 ItemId 기반이라 ISBN URL로 직접 접근할 수 없다.
+// DB에 이미 저장된 isbn->item_id 매핑을 이용해 해당 상품의 상세를 (재)수집한다.
+async function runDetailByIsbnCommand(isbn) {
+  if (!isbn) {
+    throw new Error("Usage: node src/index.js detailByIsbn <isbn>");
+  }
+
+  const collection = await getCollection();
+  const doc = await collection.findOne(
+    { isbn: String(isbn) },
+    { projection: { item_id: 1, url: 1 } }
+  );
+
+  if (!doc || (!doc.item_id && !doc.url)) {
+    throw new Error(`ISBN ${isbn} 에 해당하는 문서를 DB에서 찾지 못했습니다.`);
+  }
+
+  return runDetailCommand(doc.item_id ?? null, doc.url ?? null);
+}
+
 async function markDetailUpdated(filter) {
   const collection = await getCollection();
   const now = new Date();
@@ -269,7 +289,6 @@ async function runDetailLinkClassCommand(linkClass, limit = 5000, skip = 0) {
     throw new Error("Usage: node src/index.js detailLinkClass <linkClass> [limit] [skip]");
   }
 
-  await ensureBrowsersInstalled();
   const collection = await getCollection();
   const query = {
     linkClass: String(linkClass),
@@ -350,7 +369,6 @@ async function runDetailLinkClassCommand(linkClass, limit = 5000, skip = 0) {
 }
 
 async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
-  await ensureBrowsersInstalled();
   const collection = await getCollection();
   const targets = await collection.find(
     {
@@ -379,10 +397,13 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
   let count = 1;
 
   for (const target of targets) {
+    const n = count++;
+    const startedAt = Date.now();
     try {
-      console.log("ALL", "item_id:", target.item_id, `: ${count++} / ${targets.length}`);
       const payload = await runDetailCommand(target.item_id ?? null, target.url ?? null);
       await markDetailUpdated({ _id: target._id });
+      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+      console.log("ALL", "item_id:", target.item_id, `: ${n} / ${targets.length} (${elapsed}s)`);
       processed.push({
         item_id: payload.item.item_id,
         title: payload.item.title,
@@ -390,10 +411,11 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
         linkClass: target.linkClass ?? null
       });
     } catch (error) {
+      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
       if (error instanceof BlockedDetailError) {
         await markBlockedDetail({ _id: target._id }, error.reason);
         const label = error.reason === "private" ? "비공개 상품" : "성인도서(19세)";
-        console.log("ALL", "item_id:", target.item_id, `: ${label} → ${error.reason} 플래그 후 건너뜀`);
+        console.log("ALL", "item_id:", target.item_id, `: ${n} / ${targets.length} ${label} → ${error.reason} 플래그 후 건너뜀 (${elapsed}s)`);
         skippedBlocked.push({
           item_id: target.item_id ?? null,
           title: target.title ?? "",
@@ -403,12 +425,14 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
         });
         continue;
       }
+      const message = error instanceof Error ? error.message : String(error);
+      console.log("ALL", "item_id:", target.item_id, `: ${n} / ${targets.length} 실패 → ${message} (${elapsed}s)`);
       failed.push({
         item_id: target.item_id ?? null,
         title: target.title ?? "",
         url: target.url ?? "",
         linkClass: target.linkClass ?? null,
-        error: error instanceof Error ? error.message : String(error)
+        error: message
       });
     }
   }
@@ -1086,6 +1110,13 @@ async function main() {
   if (command === "detail") {
     const itemId = process.argv[3];
     const payload = await runDetailCommand(itemId, null);
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (command === "detailByIsbn") {
+    const isbn = process.argv[3];
+    const payload = await runDetailByIsbnCommand(isbn);
     console.log(JSON.stringify(payload, null, 2));
     return;
   }

@@ -72,6 +72,15 @@ export async function saveBookList(items) {
     });
 
     if (existing?.detail_updated_at) {
+      // 상세가 이미 수집된 레코드는 전체 갱신은 건너뛰되, 저자 정보는 무조건 갱신한다.
+      if (book.author) {
+        operations.push({
+          updateOne: {
+            filter,
+            update: { $set: { author: book.author, updated_at: now } }
+          }
+        });
+      }
       skippedCount += 1;
       continue;
     }
