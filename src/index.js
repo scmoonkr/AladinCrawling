@@ -118,13 +118,13 @@ async function runListAllCommand(CID, pageCount) {
       pages.push({ page, saved_count: 0, error: message });
       break;
     }
-    console.log(CID, page, data.items.length);
-
     if (data.items.length === 0) {
+      console.log(CID, page, 0, "-", 0);
       break;
     }
 
     const result = await saveBookList(data.items);
+    console.log(CID, page, data.items.length, "-", result.upsertedCount ?? 0);
 
     pages.push({
       page,
