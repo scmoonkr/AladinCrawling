@@ -411,7 +411,8 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
     {
       detail_updated_at: { $exists: false },
       is_adult: { $ne: true },
-      is_private: { $ne: true }
+      is_private: { $ne: true },
+      detail_status: { $ne: "adult_blocked" }
     },
     {
       projection: {
