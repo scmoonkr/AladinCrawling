@@ -108,6 +108,7 @@ async function runListAllCommand(CID, pageCount) {
   };
 
   for (let page = 1; page <= pageCount; page += 1) {
+    const startedAt = Date.now();
     let data;
     try {
       data = await fetchBookList({ CID, page, pageSize: 50 });
@@ -119,12 +120,12 @@ async function runListAllCommand(CID, pageCount) {
       break;
     }
     if (data.items.length === 0) {
-      console.log(CID, page, 0, "-", 0);
+      console.log(CID, page, 0, "-", 0, `(${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
       break;
     }
 
     const result = await saveBookList(data.items);
-    console.log(CID, page, data.items.length, "-", result.upsertedCount ?? 0);
+    console.log(CID, page, data.items.length, "-", result.upsertedCount ?? 0, `(${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
 
     pages.push({
       page,
@@ -1264,6 +1265,16 @@ async function main() {
   if (command === "detailByIsbn") {
     const isbn = process.argv[3];
     const payload = await runDetailByIsbnCommand(isbn);
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (command === "detailByItemid") {
+    const itemId = process.argv[3];
+    if (!itemId) {
+      throw new Error("Usage: node src/index.js detailByItemid <itemId>");
+    }
+    const payload = await runDetailCommand(itemId, null);
     console.log(JSON.stringify(payload, null, 2));
     return;
   }

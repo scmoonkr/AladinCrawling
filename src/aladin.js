@@ -61,7 +61,14 @@ function sanitizeInsideText(text) {
 
 function toAbsoluteUrl(url) {
   if (!url) return "";
-  return new URL(url, ALADIN_BASE_URL).toString();
+  // 알라딘 페이지의 일부 img src 는 상대/절대 어느 쪽으로도 파싱되지 않는
+  // 깨진 값(예: 잘못된 스킴)이라 new URL 이 "Invalid URL" 을 던진다.
+  // 이미지 하나 때문에 상세 수집 전체가 실패하지 않도록 실패 시 빈 문자열로 무시한다.
+  try {
+    return new URL(url, ALADIN_BASE_URL).toString();
+  } catch {
+    return "";
+  }
 }
 
 function parseNumber(value) {
@@ -306,23 +313,143 @@ function sleep(ms) {
 // 일시적으로 재시도할 가치가 있는 상태코드 (과부하/속도 제한 등)
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
-async function fetchHtml(url, { retries = 4, baseDelayMs = 1000, headers } = {}) {
+// 지수 백오프 상한. 알라딘 429(속도 제한)가 지속돼도 한 요청이 이보다 오래 대기하진 않는다.
+const MAX_BACKOFF_MS = 30000;
+
+// 지수 백오프 + 지터. 재시도가 같은 시각에 몰려 다시 429 를 유발하지 않도록 ±25% 흔든다.
+function backoffDelay(baseDelayMs, attempt) {
+  const capped = Math.min(baseDelayMs * 2 ** attempt, MAX_BACKOFF_MS);
+  return Math.round(capped * (0.75 + Math.random() * 0.5));
+}
+
+// 429 응답이 Retry-After 헤더(초 또는 날짜)를 주면 그 값을 우선 존중한다.
+function parseRetryAfterMs(response) {
+  const header = response.headers?.get?.("retry-after");
+  if (!header) return 0;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.min(seconds * 1000, MAX_BACKOFF_MS);
+  const dateMs = Date.parse(header);
+  return Number.isFinite(dateMs) ? Math.max(0, Math.min(dateMs - Date.now(), MAX_BACKOFF_MS)) : 0;
+}
+
+// ── 전역 적응형 요청 스로틀 ────────────────────────────────────
+// 알라딘 429(속도 제한)를 근본적으로 줄이기 위해 모든 HTTP 요청을 하나의 큐로 통제한다.
+// 서버 한도를 미리 알 수 없으므로 간격을 "적응형"으로 운용한다:
+//   - 429 를 만나면 현재 간격을 늘리고(느려짐) 전체를 잠깐 멈춘다(쿨다운).
+//   - 성공이 일정 횟수 이어지면 간격을 조금씩 다시 줄인다(빨라짐).
+// 필요하면 .env 로 조절한다:
+//   ALADIN_MAX_CONCURRENCY(기본1) / ALADIN_MIN_GAP_MS(기본700) /
+//   ALADIN_MAX_GAP_MS(기본10000) / ALADIN_429_COOLDOWN_MS(기본15000)
+// .env 는 db.js 의 dotenv.config() 로 로드되는데, 이 모듈이 그보다 먼저 import 되므로
+// 모듈 로드 시점에 process.env 를 읽으면 값이 비어 있다. 따라서 "요청 시점"에 지연 평가한다.
+function rlNum(name, fallback) {
+  return Number(process.env[name]) || fallback;
+}
+const RATE_LIMIT = {
+  get maxConcurrency() { return rlNum("ALADIN_MAX_CONCURRENCY", 1); },
+  get minGapMs() { return rlNum("ALADIN_MIN_GAP_MS", 700); },
+  get maxGapMs() { return rlNum("ALADIN_MAX_GAP_MS", 10000); },
+  get cooldownMs() { return rlNum("ALADIN_429_COOLDOWN_MS", 15000); },
+};
+
+const _rlQueue = [];
+let _rlActive = 0;
+let _rlLastStart = 0;
+let _rlTimer = null;
+let _rlCurrentGap = 0;   // 적응형 추가 간격(0이면 minGap 사용). 429 시 증가.
+let _rlPauseUntil = 0;   // 429 쿨다운: 이 시각까지 전체 대기
+let _rlOkStreak = 0;
+
+// 현재 유효 간격(설정된 minGap 과 적응형 값 중 큰 값).
+function _rlEffectiveGap() {
+  return Math.max(_rlCurrentGap, RATE_LIMIT.minGapMs);
+}
+
+// 다음 요청을 시작해도 되는 가장 이른 시각(간격 + 쿨다운 반영).
+function _rlNextStartAt() {
+  return Math.max(_rlLastStart + _rlEffectiveGap(), _rlPauseUntil);
+}
+
+// 429 발생: 간격을 1.5배로 늘리고(상한 maxGap) 전체를 cooldown 만큼 멈춘다.
+function _rlNote429() {
+  _rlOkStreak = 0;
+  _rlCurrentGap = Math.min(Math.round(_rlEffectiveGap() * 1.5), RATE_LIMIT.maxGapMs);
+  _rlPauseUntil = Date.now() + RATE_LIMIT.cooldownMs;
+  console.warn(`[rate-limit] 429 감지 → 간격 ${_rlCurrentGap}ms 로 상향, ${RATE_LIMIT.cooldownMs}ms 쿨다운`);
+}
+
+// 성공 누적: 20회 연속 성공마다 간격을 20%씩(하한 minGap) 되돌린다.
+function _rlNoteOk() {
+  _rlOkStreak += 1;
+  if (_rlOkStreak >= 20 && _rlEffectiveGap() > RATE_LIMIT.minGapMs) {
+    _rlCurrentGap = Math.max(RATE_LIMIT.minGapMs, Math.round(_rlEffectiveGap() * 0.8));
+    _rlOkStreak = 0;
+  }
+}
+
+function _rlSchedule() {
+  if (_rlTimer) return;
+  if (_rlActive >= RATE_LIMIT.maxConcurrency || _rlQueue.length === 0) return;
+  const wait = Math.max(0, _rlNextStartAt() - Date.now());
+  _rlTimer = setTimeout(() => {
+    _rlTimer = null;
+    if (_rlActive >= RATE_LIMIT.maxConcurrency || _rlQueue.length === 0) {
+      _rlSchedule();
+      return;
+    }
+    // 대기 중 429 쿨다운이 늘어났을 수 있으니 시작 시각을 다시 확인한다.
+    if (Date.now() < _rlNextStartAt()) {
+      _rlSchedule();
+      return;
+    }
+    const resolve = _rlQueue.shift();
+    _rlActive += 1;
+    _rlLastStart = Date.now();
+    resolve();
+    _rlSchedule(); // 다음 대기자도 간격/동시성/쿨다운 규칙에 맞춰 예약
+  }, wait);
+}
+
+function _rlAcquire() {
+  return new Promise((resolve) => {
+    _rlQueue.push(resolve);
+    _rlSchedule();
+  });
+}
+
+function _rlRelease() {
+  _rlActive -= 1;
+  _rlSchedule();
+}
+
+// 모든 알라딘 요청은 이 래퍼를 통해서만 나간다(동시성·간격·쿨다운 강제).
+async function throttledFetch(url, options) {
+  await _rlAcquire();
+  try {
+    return await fetch(url, options);
+  } finally {
+    _rlRelease();
+  }
+}
+
+async function fetchHtml(url, { retries = 6, baseDelayMs = 2000, headers } = {}) {
   for (let attempt = 0; ; attempt += 1) {
     let response;
     try {
-      response = await fetch(url, { headers: { ...DEFAULT_HEADERS, ...headers } });
+      response = await throttledFetch(url, { headers: { ...DEFAULT_HEADERS, ...headers } });
     } catch (error) {
       // 네트워크 오류는 재시도 대상
       if (attempt >= retries) {
         throw error;
       }
-      const delay = baseDelayMs * 2 ** attempt;
+      const delay = backoffDelay(baseDelayMs, attempt);
       console.warn(`fetch 재시도 ${attempt + 1}/${retries} (network: ${error.message}, ${delay}ms 대기): ${url}`);
       await sleep(delay);
       continue;
     }
 
     if (response.ok) {
+      _rlNoteOk(); // 성공 누적 → 간격을 서서히 되돌림
       return response.text();
     }
 
@@ -331,7 +458,12 @@ async function fetchHtml(url, { retries = 4, baseDelayMs = 1000, headers } = {})
       throw new Error("Failed to fetch " + url + " (" + response.status + ")");
     }
 
-    const delay = baseDelayMs * 2 ** attempt;
+    // 429 는 전역 스로틀을 늦추고 쿨다운을 건 뒤, Retry-After 우선·없으면 지수 백오프.
+    if (response.status === 429) {
+      _rlNote429();
+    }
+    const retryAfter = response.status === 429 ? parseRetryAfterMs(response) : 0;
+    const delay = retryAfter || backoffDelay(baseDelayMs, attempt);
     console.warn(`fetch 재시도 ${attempt + 1}/${retries} (HTTP ${response.status}, ${delay}ms 대기): ${url}`);
     await sleep(delay);
   }
@@ -398,7 +530,7 @@ async function fetchInsideContent(itemId) {
   url.searchParams.set("paperlength", "0");
   url.searchParams.set("contenttype", "3");
 
-  const response = await fetch(url, { headers: { ...DEFAULT_HEADERS, "x-requested-with": "XMLHttpRequest" } });
+  const response = await throttledFetch(url, { headers: { ...DEFAULT_HEADERS, "x-requested-with": "XMLHttpRequest" } });
 
   if (!response.ok) {
     return "";
@@ -574,7 +706,12 @@ async function fetchBookCards(url, options = {}) {
   const html = await fetchHtml(url);
   const $ = cheerio.load(html);
   const rawItems = $(".ss_book_box").map((_, element) => parseBookCard($, $(element))).get();
-  const items = await enrichListItemsWithCategories(rawItems);
+  // 목록 단계에서 항목별 카테고리를 받으려면 각 상세페이지를 50건씩 추가로 요청해야 해
+  // 페이지당 시간이 수십 배로 늘어난다. 카테고리는 상세 크롤 단계에서 채워지므로 기본은 생략.
+  // 목록 단계에서도 카테고리가 필요하면 .env 에 ALADIN_LIST_CATEGORIES=1 을 설정한다.
+  const items = process.env.ALADIN_LIST_CATEGORIES === "1"
+    ? await enrichListItemsWithCategories(rawItems)
+    : rawItems;
   const linkClass = options.CID ?? options.categoryId ?? null;
 
   return {

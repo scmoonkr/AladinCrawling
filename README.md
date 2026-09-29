@@ -53,8 +53,14 @@ node src/index.js listCategoryAll 1230 10
 # detail
 # limit skip
 node src\index.js detailLinkClassAll 100000 0
+
+# crawling deail itemid
+# https://www.aladin.co.kr/shop/wproduct.aspx?ItemId=398897546
+node src\index.js detailByItemid 398897546
+
 # crawling deail ISBN
 node src\index.js detailByIsbn 9791193904435
+
 # author list
 node src/index.js authorList 1 1
 
