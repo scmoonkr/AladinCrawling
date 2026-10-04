@@ -147,7 +147,7 @@ function parseListMetaParts(metaParts) {
   return { author, publisher, pub_date: pubDate };
 }
 
-function parseBookCard($, $card) {
+export function parseBookCard($, $card) {
   const itemNodes = $card.find(".ss_book_list").first().find("ul > li").toArray();
   const titleIndex = itemNodes.findIndex((node) => $(node).find("a.bo3").length > 0);
   const titleItem = titleIndex >= 0 ? $(itemNodes[titleIndex]) : $([]);
@@ -432,7 +432,7 @@ async function throttledFetch(url, options) {
   }
 }
 
-async function fetchHtml(url, { retries = 6, baseDelayMs = 2000, headers } = {}) {
+export async function fetchHtml(url, { retries = 6, baseDelayMs = 2000, headers } = {}) {
   for (let attempt = 0; ; attempt += 1) {
     let response;
     try {

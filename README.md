@@ -61,6 +61,17 @@ node src\index.js detailByItemid 398897546
 # crawling deail ISBN
 node src\index.js detailByIsbn 9791193904435
 
+# 문학상 수상작 목록 (book_lists / book_list_items)
+# 분류: 1 국내 문학상 · 2 해외 문학상 · 3 국내 어린이 문학상 · 4 해외 어린이 문학상
+# 상 목록만 보기 (DB 를 쓰지 않음)
+node src/index.js awardLists 2
+# 수상작 수집 — node src/index.js awards <all|분류> [awardId] [maxPages] [--dry-run]
+node src/index.js awards 2 22 1 --dry-run
+node src/index.js awards all
+# 목록에는 있는데 books 에 상세가 없는 책의 상세 수집 — node src/index.js listDetails <limit>
+node src/index.js listDetails 1000
+# 이후 KRIN 에서: npm --prefix packages/server run link:book-lists  (global_books 연결 + 배지)
+
 # author list
 node src/index.js authorList 1 1
 

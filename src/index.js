@@ -7,6 +7,8 @@ import { closeKyoboBrowser, crawlKyoboPrice, KyoboRateLimitError } from "./kyobo
 import { crawlNlcyByKdc, crawlNlcyNew, fetchNlcyDetail, fetchNlcyList, saveNlcyDetail } from "./nlcy.js";
 import { saveAuthorDetail, saveAuthorList } from "./author-store.js";
 import { saveBookDetail, saveBookList } from "./store.js";
+import { AWARD_TYPES, fetchAwardItems, fetchAwardList } from "./awards.js";
+import { findListItemsWithoutBook, saveAwardList } from "./list-store.js";
 import { Aladin as AladinCategoryList } from "./category.js";
 
 // category.js는 최상위 카테고리 배열(Aladin)을 export한다. 기존 코드가 기대하는 { category: [...] } 형태로 감싼다.
@@ -294,6 +296,92 @@ function isSkippableIsbn(isbn) {
 }
 
 async function markDetailSkipped(filter, reason) {
+// ── 문학상 수상작 목록 (book_lists / book_list_items) ──────────────────────────
+
+function awardTypesOf(awardType) {
+  if (!awardType || awardType === "all") return Object.keys(AWARD_TYPES).map(Number);
+  if (!AWARD_TYPES[awardType]) throw new Error("Usage: node src/index.js awards <all|1|2|3|4> [awardId] [maxPages] [--dry-run]");
+  return [Number(awardType)];
+}
+
+// 분류별 상 목록만 본다 (DB 를 쓰지 않는다)
+async function runAwardListsCommand(awardType) {
+  const types = [];
+  for (const type of awardTypesOf(awardType)) {
+    const awards = await fetchAwardList(type);
+    types.push({ awardType: type, name: AWARD_TYPES[type].name, count: awards.length, awards });
+  }
+  return { command: "awardLists", total: types.reduce((sum, type) => sum + type.count, 0), types };
+}
+
+// 수상작 수집 → book_lists / book_list_items 저장. --dry-run 이면 수집만 하고 저장하지 않는다
+async function runAwardsCommand({ awardType, awardId, maxPages, dryRun }) {
+  const summary = [];
+  const failed = [];
+  let listCount = 0;
+  let itemCount = 0;
+  let upserted = 0;
+
+  for (const type of awardTypesOf(awardType)) {
+    const awards = (await fetchAwardList(type)).filter((award) => !awardId || award.awardId === String(awardId));
+    for (const award of awards) {
+      try {
+        const { items, lastPage } = await fetchAwardItems(award, { maxPages });
+        const withYear = items.filter((item) => item.year != null).length;
+        let saved = { upserted: 0, modified: 0 };
+        if (!dryRun) saved = await saveAwardList(award, items);
+        listCount += 1;
+        itemCount += items.length;
+        upserted += saved.upserted;
+        summary.push({ awardType: type, awardId: award.awardId, name: award.name, items: items.length, withYear, pages: lastPage, new: saved.upserted });
+        console.error(`[${AWARD_TYPES[type].name}] ${award.name} — ${items.length}권 (연도 ${withYear})${dryRun ? "" : ` 신규 ${saved.upserted}`}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failed.push({ awardType: type, awardId: award.awardId, name: award.name, error: message });
+        console.error(`수상 목록 수집 실패 ${award.name}: ${message}`);
+      }
+    }
+  }
+
+  return { command: "awards", dryRun, lists: listCount, items: itemCount, new_items: upserted, failed_count: failed.length, failed, summary };
+}
+
+// 목록에는 있는데 books 에 상세가 없는 책의 상세를 수집한다 (KRIN 이 GlobalBook 으로 만들 수 있게)
+async function runListDetailsCommand(limit) {
+  const targets = await findListItemsWithoutBook(limit);
+  let saved = 0;
+  const blocked = [];
+  const failed = [];
+
+  for (const target of targets) {
+    try {
+      const data = await fetchBookDetail({ itemId: target.itemId });
+      await saveBookDetail(data);
+      saved += 1;
+      if (saved % 50 === 0) console.error(`listDetails … ${saved}/${targets.length}`);
+    } catch (error) {
+      if (error instanceof BlockedDetailError) {
+        // 성인·비공개 상품 — 다음 실행에서 다시 시도하지 않도록 표시만 남긴다
+        const collection = await getCollection();
+        const now = new Date();
+        await collection.updateOne(
+          { item_id: String(target.itemId) },
+          {
+            $set: { title: target.title, blocked_reason: error.reason, blocked_checked_at: now, updated_at: now, [error.reason === "private" ? "is_private" : "is_adult"]: true },
+            $setOnInsert: { created_at: now }
+          },
+          { upsert: true }
+        );
+        blocked.push({ itemId: target.itemId, reason: error.reason });
+        continue;
+      }
+      failed.push({ itemId: target.itemId, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  return { command: "listDetails", target_count: targets.length, saved_count: saved, blocked_count: blocked.length, failed_count: failed.length, blocked, failed };
+}
+
   const collection = await getCollection();
   const now = new Date();
 
@@ -1323,6 +1411,30 @@ async function main() {
   if (command === "kyobo") {
     const isbn = process.argv[3];
     const payload = await runKyoboCommand(isbn);
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (command === "awardLists") {
+    const payload = await runAwardListsCommand(process.argv[3]);
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (command === "awards") {
+    const args = process.argv.slice(3).filter((arg) => !arg.startsWith("--"));
+    const payload = await runAwardsCommand({
+      awardType: args[0],
+      awardId: args[1],
+      maxPages: parsePositiveInt(args[2], Infinity),
+      dryRun: process.argv.includes("--dry-run")
+    });
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (command === "listDetails") {
+    const payload = await runListDetailsCommand(parsePositiveInt(process.argv[3], 1000));
     console.log(JSON.stringify(payload, null, 2));
     return;
   }
