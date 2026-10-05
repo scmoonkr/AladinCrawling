@@ -259,6 +259,14 @@ async function runDetailByIsbnCommand(isbn) {
   return runDetailCommand(doc.item_id ?? null, doc.url ?? null);
 }
 
+// 동적 섹션(책소개/목차/저자/출판사 책소개)을 받지 못한 건은 완료로 찍지 않고
+// 실패로 처리해 다음 실행에서 다시 수집되게 한다.
+function assertDynamicSections(payload) {
+  if (payload.item.dynamic_failed) {
+    throw new Error("동적 섹션 수집 실패 (정적 필드만 저장, 다음 실행에서 재시도)");
+  }
+}
+
 async function markDetailUpdated(filter) {
   const collection = await getCollection();
   const now = new Date();
@@ -288,14 +296,6 @@ async function markBlockedDetail(filter, reason) {
   });
 }
 
-// 알라딘 내부코드(K로 시작)나 자리수가 모자란 값(9자 이하)은 정상 ISBN이 아니므로
-// 상세를 수집하지 않는다. 대상에서 영구 제외되도록 detail_updated_at 을 찍어둔다.
-function isSkippableIsbn(isbn) {
-  const value = String(isbn ?? "").trim();
-  return value.startsWith("K") || value.length <= 9;
-}
-
-async function markDetailSkipped(filter, reason) {
 // ── 문학상 수상작 목록 (book_lists / book_list_items) ──────────────────────────
 
 function awardTypesOf(awardType) {
@@ -382,6 +382,18 @@ async function runListDetailsCommand(limit) {
   return { command: "listDetails", target_count: targets.length, saved_count: saved, blocked_count: blocked.length, failed_count: failed.length, blocked, failed };
 }
 
+// 알라딘 내부코드(K로 시작)나 자리수가 모자란 값(9자 이하)은 정상 ISBN이 아니므로
+// 상세를 수집하지 않는다. 대상에서 영구 제외되도록 detail_updated_at 을 찍어둔다.
+// list 크롤 직후에는 ISBN 이 아직 없으므로(null), 빈 값은 스킵하지 않고 상세를 수집한다.
+function isSkippableIsbn(isbn) {
+  const value = String(isbn ?? "").trim();
+  if (!value) {
+    return false;
+  }
+  return value.startsWith("K") || value.length <= 9;
+}
+
+async function markDetailSkipped(filter, reason) {
   const collection = await getCollection();
   const now = new Date();
 
@@ -404,7 +416,7 @@ async function runDetailLinkClassCommand(linkClass, limit = 5000, skip = 0) {
   const collection = await getCollection();
   const query = {
     linkClass: String(linkClass),
-    detail_updated_at: { $exists: false },
+    detail_updated_at: null,
     is_adult: { $ne: true },
     is_private: { $ne: true }
   };
@@ -448,6 +460,7 @@ async function runDetailLinkClassCommand(linkClass, limit = 5000, skip = 0) {
       }
       console.log(linkClass, "item_id:", target.item_id, `: ${n} / ${targets.length}`);
       const payload = await runDetailCommand(target.item_id ?? null, target.url ?? null);
+      assertDynamicSections(payload);
       await markDetailUpdated({ _id: target._id });
       processed.push({
         item_id: payload.item.item_id,
@@ -498,7 +511,7 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
   const collection = await getCollection();
   const targets = await collection.find(
     {
-      detail_updated_at: { $exists: false },
+      detail_updated_at: null,
       is_adult: { $ne: true },
       is_private: { $ne: true },
       detail_status: { $ne: "adult_blocked" }
@@ -541,6 +554,7 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
         continue;
       }
       const payload = await runDetailCommand(target.item_id ?? null, target.url ?? null);
+      assertDynamicSections(payload);
       await markDetailUpdated({ _id: target._id });
       const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
       console.log("ALL", "item_id:", target.item_id, `: ${n} / ${targets.length} (${elapsed}s)`);
@@ -601,7 +615,7 @@ async function runDetailCategoryCommand(category) {
   const targets = await collection.find(
     {
       categories: { $elemMatch: { $regex: regex } },
-      detail_updated_at: { $exists: false },
+      detail_updated_at: null,
       is_adult: { $ne: true },
       is_private: { $ne: true }
     },

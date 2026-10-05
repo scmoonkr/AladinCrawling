@@ -619,15 +619,25 @@ function parseAuthorDetails(html) {
     .filter(Boolean);
 }
 
+// 박스는 책마다 있는 것만 내려온다(책소개 없이 목차만 오는 등). 순서로 고르면
+// 한 칸씩 밀리므로 왼쪽 제목(또는 박스 안의 고유 id)으로 찾는다.
+function findBox(boxes, label, idSelector) {
+  return boxes.find((box) => {
+    if (idSelector && box.find(idSelector).length > 0) {
+      return true;
+    }
+    return box.find(".Ere_prod_mconts_LS").first().text().replace(/\s+/g, "") === label;
+  });
+}
+
 function parseDynamicDetails(sections, fallbackImages) {
   const introBoxes = getBoxes(sections.Introduce);
-  const authorBoxes = getBoxes(sections.AuthorInfo);
   const publisherBoxes = getBoxes(sections.PublisherDesc);
 
-  const bookReviewBox = introBoxes[0];
-  const tocBox = introBoxes[1];
-  const insideBox = introBoxes[2];
-  const publisherReviewBox = publisherBoxes[1];
+  const bookReviewBox = findBox(introBoxes, "책소개");
+  const tocBox = findBox(introBoxes, "목차", "#div_TOC_Short, #div_TOC_All");
+  const insideBox = findBox(introBoxes, "책속에서", "#div_BookIn_Brief, #div_BookIn_All");
+  const publisherReviewBox = findBox(publisherBoxes, "출판사제공책소개", "#div_PublisherDesc_Short, #div_PublisherDesc_All");
 
   const bookReviewHtml = bookReviewBox ? (bookReviewBox.find(".Ere_prod_mconts_R").first().html() || "") : "";
   const indexHtml = tocBox ? (tocBox.find("#div_TOC_All").first().html() || tocBox.find("#div_TOC_Short").first().html() || tocBox.find(".Ere_prod_mconts_R").first().html() || "") : "";
@@ -767,13 +777,16 @@ export async function fetchBookDetail(input) {
   const productIsbn = $(".hd_ISBN").attr("value") || isbn;
   const fallbackImages = parseCardReviewImages($);
   let sections;
+  let dynamicFailed = false;
   try {
     sections = await fetchDynamicSections(detailUrl, productIsbn);
   } catch (error) {
     // 일시적 실패(네트워크/타임아웃 등)는 정적 필드(isbn/page/size/weight 등)라도
-    // 저장되도록 빈 섹션으로 대체하고 경고만 남긴다.
+    // 저장되도록 빈 섹션으로 대체하고 경고만 남긴다. dynamic_failed 로 표시해 두면
+    // 저장 쪽에서 detail_updated_at 을 찍지 않아 다음 실행에서 다시 수집된다.
     console.warn(`동적 섹션 수집 실패 (item ${itemId}) → 정적 필드만 저장: ${error instanceof Error ? error.message : error}`);
     sections = {};
+    dynamicFailed = true;
   }
   const dynamic = parseDynamicDetails(sections, fallbackImages);
   const insideContent = await fetchInsideContent(itemId);
@@ -800,6 +813,7 @@ export async function fetchBookDetail(input) {
     index: dynamic.index,
     inside: insideContent || dynamic.inside,
     author_detail: dynamic.author_detail,
-    publisher_review: dynamic.publisher_review
+    publisher_review: dynamic.publisher_review,
+    dynamic_failed: dynamicFailed
   };
 }

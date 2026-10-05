@@ -124,13 +124,22 @@ export async function saveBookDetail(book) {
   const collection = await getCollection();
   const now = new Date();
 
+  // 동적 섹션 수집이 실패한 경우: 정적 필드만 저장하고 기존 동적 필드는 빈 값으로
+  // 덮어쓰지 않는다. detail_updated_at 도 찍지 않아 다음 실행에서 다시 수집된다.
+  const fields = buildDetailFields(book);
+  if (book.dynamic_failed) {
+    for (const key of ["book_review", "index", "inside", "author_detail", "publisher_review"]) {
+      delete fields[key];
+    }
+  }
+
   return collection.updateOne(
     buildFilter(book),
     {
       $set: {
-        ...buildDetailFields(book),
+        ...fields,
         updated_at: now,
-        detail_updated_at: now
+        ...(book.dynamic_failed ? {} : { detail_updated_at: now })
       },
       $unset: {
         booklist: "",
