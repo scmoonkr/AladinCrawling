@@ -5,6 +5,7 @@ import { fetchAuthorDetail, fetchAuthorListPage, getAuthorAlphabets, getAuthorCa
 import { fetchCallNumberByIsbn } from "./read365.js";
 import { closeKyoboBrowser, crawlKyoboPrice, KyoboRateLimitError } from "./kyobo.js";
 import { crawlNlcyByKdc, crawlNlcyNew, fetchNlcyDetail, fetchNlcyList, saveNlcyDetail } from "./nlcy.js";
+import { crawlNlKdc, fetchNlDetail, fetchNlList, saveNlDetail } from "./nl.js";
 import { saveAuthorDetail, saveAuthorList } from "./author-store.js";
 import { saveBookDetail, saveBookList } from "./store.js";
 import { AWARD_TYPES, fetchAwardItems, fetchAwardList } from "./awards.js";
@@ -1036,6 +1037,49 @@ async function runNlcyDetailAllCommand(limit = 5000, skip = 0) {
   };
 }
 
+// nl 컬렉션 중 MARC 미수집 건의 상세를 수집한다
+async function runNlDetailAllCommand(limit = 5000, skip = 0) {
+  const collection = await getCollection("nl");
+  const targets = await collection.find(
+    { viewKey: { $exists: true }, tags: { $exists: false } },
+    { projection: { _id: 1, viewKey: 1, viewType: 1, title: 1 } }
+  )
+    .sort({ created_at: 1 })
+    .skip(skip)
+    .limit(limit)
+    .toArray();
+
+  const processed = [];
+  const failed = [];
+  let count = 1;
+
+  for (const target of targets) {
+    const startedAt = Date.now();
+    try {
+      const detail = await fetchNlDetail({ viewKey: target.viewKey, viewType: target.viewType || "AH1" });
+      await saveNlDetail(detail);
+      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+      console.log("nl:detail", target.viewKey, `: ${count++} / ${targets.length} (${elapsed}s) ${target.title ?? ""}`);
+      processed.push({ viewKey: target.viewKey, title: target.title ?? "", tags: detail.tags.length });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.log("nl:detail", target.viewKey, `: ${count++} / ${targets.length} 실패 → ${message} ${target.title ?? ""}`);
+      failed.push({ viewKey: target.viewKey ?? null, title: target.title ?? "", error: message });
+    }
+  }
+
+  return {
+    command: "nlDetailAll",
+    skip,
+    limit,
+    matched_count: targets.length,
+    processed_count: processed.length,
+    failed_count: failed.length,
+    processed,
+    failed
+  };
+}
+
 async function runRead365Command(isbn) {
   if (!isbn) {
     throw new Error("Usage: node src/index.js read365 <isbn>");
@@ -1437,6 +1481,52 @@ async function main() {
       throw new Error("Usage: node src/index.js detailByItemid <itemId>");
     }
     const payload = await runDetailCommand(itemId, null);
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  // 국립중앙도서관(nl.go.kr): nlList <kdc> [page] [pageSize] | nlCrawl <kdc|from-to> [pageSize] [maxPages] | nlDetail <viewKey> [--save]
+  if (command === "nlList") {
+    const items = await fetchNlList({
+      kdc: process.argv[3],
+      page: parsePositiveInt(process.argv[4], 1),
+      pageSize: parsePositiveInt(process.argv[5], 100)
+    });
+    console.log(JSON.stringify({ command: "nlList", count: items.length, items }, null, 2));
+    return;
+  }
+
+  if (command === "nlCrawl") {
+    const range = String(process.argv[3] ?? "");
+    const [from, to = from] = range.split("-");
+    if (!/^\d{1,3}$/.test(from) || !/^\d{1,3}$/.test(to)) {
+      throw new Error("Usage: node src/index.js nlCrawl <kdc|from-to> [pageSize] [maxPages]  (예: 010 / 000-999)");
+    }
+    const pageSize = parsePositiveInt(process.argv[4], 100);
+    const maxPages = parsePositiveInt(process.argv[5], Infinity);
+    const groups = [];
+    for (let code = Number(from); code <= Number(to); code += 1) {
+      groups.push(await crawlNlKdc(String(code).padStart(3, "0"), { pageSize, maxPages }));
+    }
+    const saved = groups.reduce((sum, group) => sum + group.saved_count, 0);
+    console.log(JSON.stringify({ command: "nlCrawl", range, saved_count: saved, groups }, null, 2));
+    return;
+  }
+
+  if (command === "nlDetail") {
+    const args = process.argv.slice(3).filter((arg) => !arg.startsWith("--"));
+    const detail = await fetchNlDetail({ viewKey: args[0], viewType: args[1] || "AH1" });
+    if (process.argv.includes("--save")) {
+      await saveNlDetail(detail);
+    }
+    console.log(JSON.stringify(detail, null, 2));
+    return;
+  }
+
+  if (command === "nlDetailAll") {
+    const limit = parsePositiveInt(process.argv[3], 5000);
+    const skip = parseNonNegativeInt(process.argv[4], 0);
+    const payload = await runNlDetailAllCommand(limit, skip);
     console.log(JSON.stringify(payload, null, 2));
     return;
   }
