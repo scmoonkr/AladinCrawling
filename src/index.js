@@ -189,7 +189,7 @@ async function runListCategoryAllCommand(CID, pageCount) {
   let savedCount = 0;
 
   for (const subCategory of categoryPayload.subCategories) {
-		console.log("--->", subCategory.linkClass, pageCount, subCategory.name);
+		console.log("--->", subCategory.linkClass, pageCount, `[${categoryPayload.name}] - ${subCategory.name}`);
     const payload = await runListAllCommand(subCategory.linkClass, pageCount);
     categories.push({
       CID: subCategory.linkClass,
