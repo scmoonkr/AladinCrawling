@@ -8,7 +8,9 @@ import { crawlNlcyByKdc, crawlNlcyNew, fetchNlcyDetail, fetchNlcyList, saveNlcyD
 import { saveAuthorDetail, saveAuthorList } from "./author-store.js";
 import { saveBookDetail, saveBookList } from "./store.js";
 import { AWARD_TYPES, fetchAwardItems, fetchAwardList } from "./awards.js";
-import { findListItemsWithoutBook, saveAwardList } from "./list-store.js";
+import { findListItemsWithoutBook, saveAwardList, saveKyoboList, saveRecommendList } from "./list-store.js";
+import { fetchRecommendItems, fetchRecommendList } from "./recommends.js";
+import { fetchKyoboRecommendItems, fetchKyoboRecommendMenus } from "./kyobo-recommend.js";
 import { Aladin as AladinCategoryList } from "./category.js";
 
 // category.js는 최상위 카테고리 배열(Aladin)을 export한다. 기존 코드가 기대하는 { category: [...] } 형태로 감싼다.
@@ -187,7 +189,7 @@ async function runListCategoryAllCommand(CID, pageCount) {
   let savedCount = 0;
 
   for (const subCategory of categoryPayload.subCategories) {
-		console.log("--->", subCategory.linkClass, pageCount);
+		console.log("--->", subCategory.linkClass, pageCount, subCategory.name);
     const payload = await runListAllCommand(subCategory.linkClass, pageCount);
     categories.push({
       CID: subCategory.linkClass,
@@ -344,6 +346,64 @@ async function runAwardsCommand({ awardType, awardId, maxPages, dryRun }) {
   }
 
   return { command: "awards", dryRun, lists: listCount, items: itemCount, new_items: upserted, failed_count: failed.length, failed, summary };
+}
+
+// 외부/전문기관 추천도서 수집 → book_lists / book_list_items. cid 를 주면 그 목록만
+async function runRecommendsCommand({ cid, maxPages, dryRun }) {
+  const all = await fetchRecommendList();
+  const topCids = new Set(all.map((list) => list.cid));
+  const lists = all.filter((list) => !cid || list.cid === String(cid));
+  const summary = [];
+  const failed = [];
+  let itemCount = 0;
+  let upserted = 0;
+
+  for (const list of lists) {
+    try {
+      const { items, lastPage, children } = await fetchRecommendItems(list, { topCids, maxPages });
+      const withYear = items.filter((item) => item.year != null).length;
+      let saved = { upserted: 0, modified: 0 };
+      if (!dryRun) saved = await saveRecommendList(list, items);
+      itemCount += items.length;
+      upserted += saved.upserted;
+      summary.push({ cid: list.cid, name: list.name, audience: list.audience, items: items.length, withYear, pages: lastPage, children: children.length, new: saved.upserted });
+      console.error(`[추천] ${list.name} — ${items.length}권 (연도 ${withYear}, 하위 ${children.length})${dryRun ? "" : ` 신규 ${saved.upserted}`}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failed.push({ cid: list.cid, name: list.name, error: message });
+      console.error(`추천 목록 수집 실패 ${list.name}: ${message}`);
+    }
+  }
+
+  return { command: "recommends", dryRun, lists: summary.length, items: itemCount, new_items: upserted, failed_count: failed.length, failed, summary };
+}
+
+// 교보 추천도서 · 문학상 수집 → book_lists / book_list_items. menuNum 을 주면 그 목록만
+async function runKyoboRecommendsCommand({ menuNum, maxPages, dryRun }) {
+  const menus = (await fetchKyoboRecommendMenus()).filter((menu) => !menuNum || menu.menuNum === Number(menuNum));
+  const summary = [];
+  const failed = [];
+  let itemCount = 0;
+  let upserted = 0;
+
+  for (const menu of menus) {
+    try {
+      const { items, total, divisions } = await fetchKyoboRecommendItems(menu, { maxPages });
+      const withYear = items.filter((item) => item.year != null).length;
+      let saved = { upserted: 0, modified: 0 };
+      if (!dryRun) saved = await saveKyoboList(menu, items);
+      itemCount += items.length;
+      upserted += saved.upserted;
+      summary.push({ menuNum: menu.menuNum, type: menu.type, group: menu.groupName, name: menu.name, audience: menu.audience, total, items: items.length, withYear, divisions: divisions.length, new: saved.upserted });
+      console.error(`[교보 ${menu.type === "AWARD" ? "수상" : "추천"}] ${menu.groupName} / ${menu.name} — ${items.length}권 (연도 ${withYear}, 부문 ${divisions.length})${dryRun ? "" : ` 신규 ${saved.upserted}`}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failed.push({ menuNum: menu.menuNum, name: menu.name, error: message });
+      console.error(`교보 목록 수집 실패 ${menu.name}: ${message}`);
+    }
+  }
+
+  return { command: "kyoboRecommends", dryRun, lists: summary.length, items: itemCount, new_items: upserted, failed_count: failed.length, failed, summary };
 }
 
 // 목록에는 있는데 books 에 상세가 없는 책의 상세를 수집한다 (KRIN 이 GlobalBook 으로 만들 수 있게)
@@ -557,7 +617,7 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
       assertDynamicSections(payload);
       await markDetailUpdated({ _id: target._id });
       const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
-      console.log("ALL", "item_id:", target.item_id, `: ${n} / ${targets.length} (${elapsed}s)`);
+      console.log("ALL", "item_id:", target.item_id, `: ${n} / ${targets.length} (${elapsed}s) ${payload.item.title ?? target.title ?? ""}`);
       processed.push({
         item_id: payload.item.item_id,
         title: payload.item.title,
@@ -569,7 +629,7 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
       if (error instanceof BlockedDetailError) {
         await markBlockedDetail({ _id: target._id }, error.reason);
         const label = error.reason === "private" ? "비공개 상품" : "성인도서(19세)";
-        console.log("ALL", "item_id:", target.item_id, `: ${n} / ${targets.length} ${label} → ${error.reason} 플래그 후 건너뜀 (${elapsed}s)`);
+        console.log("ALL", "item_id:", target.item_id, `: ${n} / ${targets.length} ${label} → ${error.reason} 플래그 후 건너뜀 (${elapsed}s) ${target.title ?? ""}`);
         skippedBlocked.push({
           item_id: target.item_id ?? null,
           title: target.title ?? "",
@@ -580,7 +640,7 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
         continue;
       }
       const message = error instanceof Error ? error.message : String(error);
-      console.log("ALL", "item_id:", target.item_id, `: ${n} / ${targets.length} 실패 → ${message} (${elapsed}s)`);
+      console.log("ALL", "item_id:", target.item_id, `: ${n} / ${targets.length} 실패 → ${message} (${elapsed}s) ${target.title ?? ""}`);
       failed.push({
         item_id: target.item_id ?? null,
         title: target.title ?? "",
@@ -1415,20 +1475,6 @@ async function main() {
     return;
   }
 
-  if (command === "read365") {
-    const isbn = process.argv[3];
-    const payload = await runRead365Command(isbn);
-    console.log(JSON.stringify(payload, null, 2));
-    return;
-  }
-
-  if (command === "kyobo") {
-    const isbn = process.argv[3];
-    const payload = await runKyoboCommand(isbn);
-    console.log(JSON.stringify(payload, null, 2));
-    return;
-  }
-
   if (command === "awardLists") {
     const payload = await runAwardListsCommand(process.argv[3]);
     console.log(JSON.stringify(payload, null, 2));
@@ -1447,8 +1493,56 @@ async function main() {
     return;
   }
 
+  if (command === "recommendLists") {
+    const lists = await fetchRecommendList();
+    console.log(JSON.stringify({ command: "recommendLists", total: lists.length, lists }, null, 2));
+    return;
+  }
+
+  if (command === "recommends") {
+    const args = process.argv.slice(3).filter((arg) => !arg.startsWith("--"));
+    const payload = await runRecommendsCommand({
+      cid: args[0] && args[0] !== "all" ? args[0] : null,
+      maxPages: parsePositiveInt(args[1], Infinity),
+      dryRun: process.argv.includes("--dry-run")
+    });
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (command === "kyoboRecommendMenus") {
+    const menus = await fetchKyoboRecommendMenus();
+    console.log(JSON.stringify({ command: "kyoboRecommendMenus", total: menus.length, menus }, null, 2));
+    return;
+  }
+
+  if (command === "kyoboRecommends") {
+    const args = process.argv.slice(3).filter((arg) => !arg.startsWith("--"));
+    const payload = await runKyoboRecommendsCommand({
+      menuNum: args[0] && args[0] !== "all" ? args[0] : null,
+      maxPages: parsePositiveInt(args[1], Infinity),
+      dryRun: process.argv.includes("--dry-run")
+    });
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
   if (command === "listDetails") {
     const payload = await runListDetailsCommand(parsePositiveInt(process.argv[3], 1000));
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (command === "read365") {
+    const isbn = process.argv[3];
+    const payload = await runRead365Command(isbn);
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (command === "kyobo") {
+    const isbn = process.argv[3];
+    const payload = await runKyoboCommand(isbn);
     console.log(JSON.stringify(payload, null, 2));
     return;
   }

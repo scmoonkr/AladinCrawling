@@ -19,29 +19,77 @@ async function ensureIndexes() {
   await items.createIndex({ listId: 1, year: -1, rank: 1 });
   await items.createIndex({ bookId: 1 });
   await items.createIndex({ itemId: 1 });
+  await items.createIndex({ isbn: 1 });
   indexesReady = true;
 }
 
-// 수상 목록 1개 + 책들 저장 → { listId, upserted, modified }
-export async function saveAwardList(award, items) {
+// 수상 목록 1개 + 책들 저장
+export function saveAwardList(award, items) {
+  return saveList(
+    {
+      type: "AWARD",
+      sourceKey: `award:${award.awardType}:${award.awardId}`,
+      name: award.name,
+      groupName: award.groupName,
+      audience: award.audience,
+      url: award.url
+    },
+    items
+  );
+}
+
+// 추천 목록 1개 + 책들 저장
+export function saveRecommendList(list, items) {
+  return saveList(
+    {
+      type: "RECOMMENDED",
+      sourceKey: `recommend:${list.cid}`,
+      name: list.name,
+      groupName: list.groupName,
+      audience: list.audience,
+      url: list.url
+    },
+    items
+  );
+}
+
+// 교보 추천 · 문학상 목록 1개 + 책들 저장 (책마다 ISBN · 추천 사유가 있다)
+export function saveKyoboList(menu, items) {
+  return saveList(
+    {
+      source: "kyobo",
+      type: menu.type,
+      sourceKey: `menu:${menu.menuNum}`,
+      name: menu.name,
+      groupName: menu.groupName,
+      audience: menu.audience,
+      url: menu.url
+    },
+    items
+  );
+}
+
+// 목록 1개 + 책들 저장 → { listId, upserted, modified }
+async function saveList(meta, items) {
   await ensureIndexes();
   const lists = await getCollection("book_lists");
   const listItems = await getCollection("book_list_items");
   const now = new Date();
-  const sourceKey = `award:${award.awardType}:${award.awardId}`;
+  const sourceKey = meta.sourceKey;
+  const source = meta.source ?? "aladin";
 
   const list = await lists.findOneAndUpdate(
-    { source: "aladin", sourceKey },
+    { source, sourceKey },
     {
       $set: {
-        type: "AWARD",
+        type: meta.type,
         scope: "PLATFORM",
         libraryId: null,
-        name: award.name,
-        groupName: award.groupName,
-        audience: award.audience,
+        name: meta.name,
+        groupName: meta.groupName,
+        audience: meta.audience,
         organization: null,
-        sourceUrl: award.url,
+        sourceUrl: meta.url,
         crawledAt: now,
         updatedAt: now
       },
@@ -73,11 +121,14 @@ export async function saveAwardList(award, items) {
             division: item.division ?? "",
             label: item.label,
             rank: item.rank,
-            source: "aladin",
-            crawledAt: now
+            reason: item.reason ?? "",
+            source,
+            crawledAt: now,
+            // 출처가 ISBN 을 주면(교보) 바로 저장한다 — 알라딘은 KRIN 이 연결하면서 채운다
+            ...(item.isbn ? { isbn: item.isbn } : {})
           },
           // 연결 정보는 KRIN 쪽이 채운다 — 다시 수집해도 지우지 않는다
-          $setOnInsert: { bookId: null, isbn: null, createdAt: now }
+          $setOnInsert: { bookId: null, createdAt: now, ...(item.isbn ? {} : { isbn: null }) }
         },
         upsert: true
       }

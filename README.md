@@ -68,6 +68,22 @@ node src/index.js awardLists 2
 # 수상작 수집 — node src/index.js awards <all|분류> [awardId] [maxPages] [--dry-run]
 node src/index.js awards 2 22 1 --dry-run
 node src/index.js awards all
+# 교보문고 추천도서 · 문학상 (store.kyobobook.co.kr/recommend 의 내부 API)
+# 책마다 ISBN · 선정 연도 · 부문 · 추천 사유가 온다. 추천·수상 목록의 기본 출처.
+# 메뉴(목록) 보기 (DB 를 쓰지 않음)
+node src/index.js kyoboRecommendMenus
+# 수집 — node src/index.js kyoboRecommends <all|menuNum> [maxPages] [--dry-run]
+node src/index.js kyoboRecommends 1760 1 --dry-run
+node src/index.js kyoboRecommends all
+# 요청 간격: KYOBO_RECOMMEND_INTERVAL (기본 500ms)
+
+# 외부/전문기관 추천도서 목록 (알라딘 Recommend2010/type2.aspx)
+# 목록만 보기 (DB 를 쓰지 않음)
+node src/index.js recommendLists
+# 수집 — node src/index.js recommends <all|cid> [maxPages] [--dry-run]
+node src/index.js recommends 54863 1 --dry-run
+node src/index.js recommends all
+
 # 목록에는 있는데 books 에 상세가 없는 책의 상세 수집 — node src/index.js listDetails <limit>
 node src/index.js listDetails 1000
 # 이후 KRIN 에서: npm --prefix packages/server run link:book-lists  (global_books 연결 + 배지)
