@@ -267,3 +267,140 @@ export async function crawlNlKdc(kdc, { pageSize = 100, maxPages = Infinity } = 
 
   return { kdc: String(kdc).padStart(3, "0"), crawled_pages: page - 1, saved_count: savedCount, db };
 }
+
+// ---------------------------------------------------------------------------
+// 신착도서 (N10302000000.do) — 주(週) 단위 regDate(YYYYMMDD_YYYYMMDD), 최근 약 5주만 제공
+// ---------------------------------------------------------------------------
+const NL_NEW_PAGE_PATH = "/NL/contents/N10302000000.do";
+const NL_NEW_AJAX_PATH = "/NL/search/new_arrivals_result.ajax";
+
+// 신착자료 페이지가 제공하는 주차 목록 (jsWeekList.push("20261012_20261018"))
+export async function fetchNlNewWeeks() {
+  const html = await fetchHtml(new URL(NL_NEW_PAGE_PATH, NL_BASE_URL).toString());
+  return [...html.matchAll(/jsWeekList\.push\("(\d{8}_\d{8})"\)/g)].map((m) => m[1]);
+}
+
+function parseNewList(html) {
+  const $ = cheerio.load(html);
+  const total = Number(($(".selected_data").first().text() || "0").replace(/[^0-9]/g, ""));
+
+  const items = $("li.ucsrch3_item")
+    .map((_, li) => {
+      const $li = $(li);
+      const anchor = $li.find("a.title").first();
+      const idMatch = String(anchor.attr("onclick") ?? "").match(/setDetailPage\('[^']*','([^']*)','([^']*)'\)/);
+
+      if (!idMatch) {
+        return null;
+      }
+
+      return {
+        viewKey: idMatch[1],
+        viewType: idMatch[2],
+        title: normalizeText(anchor.text()),
+        group: normalizeText($li.find(".classify .group").first().text()),
+        subject: normalizeText($li.find(".classify .category").first().text()),
+        authors: normalizeText($li.find("dd.author").first().text()).replace(/^[^:]{0,20}:\s*/, ""),
+        publisher: normalizeText($li.find("dd.publisher").first().text()),
+        pub_year: Number($li.find("dd.year").first().text().trim()) || null,
+        collect_date: normalizeText($li.find("dd.collect_date").first().text()),
+        call_nbr: normalizeText($li.find("dd.book_code").first().text())
+      };
+    })
+    .get()
+    .filter(Boolean);
+
+  return { total, items };
+}
+
+export async function fetchNlNewList({ regDate, page = 1, pageSize = 100 }) {
+  if (!regDate) {
+    throw new Error("regDate is required (YYYYMMDD_YYYYMMDD).");
+  }
+
+  const url = new URL(NL_NEW_AJAX_PATH, NL_BASE_URL);
+  url.searchParams.set("pageNum", String(page));
+  url.searchParams.set("pageSize", String(pageSize));
+  url.searchParams.set("codeName", "kdc");
+  url.searchParams.set("regDate", regDate);
+
+  const { total, items } = parseNewList(await fetchHtml(url.toString()));
+  // 서버의 naCategory=도서 필터가 0건을 돌려주므로 결과의 구분(group)으로 직접 거른다
+  return { total, items: items.filter((item) => item.group === "도서") };
+}
+
+async function saveNlNewList(items, regDate) {
+  const collection = await getCollection(NL_COLLECTION);
+  const now = new Date();
+  const operations = items.map((item) => ({
+    updateOne: {
+      filter: { viewKey: String(item.viewKey) },
+      update: {
+        $set: {
+          viewKey: String(item.viewKey),
+          viewType: item.viewType,
+          title: item.title,
+          authors: item.authors,
+          publisher: item.publisher,
+          pub_year: item.pub_year,
+          call_nbr: item.call_nbr,
+          subject: item.subject,
+          collect_date: item.collect_date,
+          reg_week: regDate,
+          updated_at: now
+        },
+        $setOnInsert: { created_at: now }
+      },
+      upsert: true
+    }
+  }));
+
+  if (operations.length === 0) {
+    return { matchedCount: 0, modifiedCount: 0, upsertedCount: 0 };
+  }
+
+  const result = await collection.bulkWrite(operations, { ordered: false });
+  return {
+    matchedCount: result.matchedCount ?? 0,
+    modifiedCount: result.modifiedCount ?? 0,
+    upsertedCount: result.upsertedCount ?? 0
+  };
+}
+
+// regDate 가 없으면 제공되는 모든 주차를 수집
+export async function crawlNlNew(regDate, { pageSize = 100, maxPages = Infinity } = {}) {
+  const weeks = regDate ? [regDate] : await fetchNlNewWeeks();
+  const db = { matchedCount: 0, modifiedCount: 0, upsertedCount: 0 };
+  const groups = [];
+  let savedCount = 0;
+
+  for (const week of weeks) {
+    let page = 1;
+    let weekSaved = 0;
+    let total = 0;
+
+    // 전체 자료(도서+학위논문 등)를 페이지 단위로 넘기므로, 도서가 0건인 페이지도 계속 진행하고
+    // 전체 건수를 다 본 시점에 종료한다.
+    while (page <= maxPages) {
+      const result = await fetchNlNewList({ regDate: week, page, pageSize });
+      total = result.total;
+      console.log(`nl new:${week} page:${page} books:${result.items.length} (전체 ${total})`);
+
+      if (result.total === 0 || (page - 1) * pageSize >= result.total) {
+        break;
+      }
+
+      const saved = await saveNlNewList(result.items, week);
+      db.matchedCount += saved.matchedCount;
+      db.modifiedCount += saved.modifiedCount;
+      db.upsertedCount += saved.upsertedCount;
+      weekSaved += result.items.length;
+      page += 1;
+    }
+
+    savedCount += weekSaved;
+    groups.push({ reg_week: week, total, saved_count: weekSaved });
+  }
+
+  return { command: "nlNew", saved_count: savedCount, db, groups };
+}

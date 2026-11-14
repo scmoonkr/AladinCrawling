@@ -123,3 +123,14 @@ node src/index.js kyoboAll 1000 0
 
 # 서버 실행 시 API
 # http://localhost:3000/api/kyobo?isbn=9788934972464
+
+
+########################################################
+# NL List
+node src/index.js nlCrawl 010
+node src/index.js nlCrawl 010-019
+
+# NL Detail
+node src/index.js nlDetailAll 5000 0
+
+# NL 신착도서

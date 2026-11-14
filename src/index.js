@@ -5,7 +5,7 @@ import { fetchAuthorDetail, fetchAuthorListPage, getAuthorAlphabets, getAuthorCa
 import { fetchCallNumberByIsbn } from "./read365.js";
 import { closeKyoboBrowser, crawlKyoboPrice, KyoboRateLimitError } from "./kyobo.js";
 import { crawlNlcyByKdc, crawlNlcyNew, fetchNlcyDetail, fetchNlcyList, saveNlcyDetail } from "./nlcy.js";
-import { crawlNlKdc, fetchNlDetail, fetchNlList, saveNlDetail } from "./nl.js";
+import { crawlNlKdc, crawlNlNew, fetchNlDetail, fetchNlList, saveNlDetail } from "./nl.js";
 import { saveAuthorDetail, saveAuthorList } from "./author-store.js";
 import { saveBookDetail, saveBookList } from "./store.js";
 import { AWARD_TYPES, fetchAwardItems, fetchAwardList } from "./awards.js";
@@ -575,7 +575,12 @@ async function runDetailLinkClassAllCommand(limit = 5000, skip = 0) {
       detail_updated_at: null,
       is_adult: { $ne: true },
       is_private: { $ne: true },
-      detail_status: { $ne: "adult_blocked" }
+      detail_status: { $ne: "adult_blocked" },
+      // 알라딘 출처가 아닌 문서(item_id/url 없음, 예: yes24·orderm)는 상세 수집 대상이 아님
+      $or: [
+        { item_id: { $exists: true, $nin: [null, ""] } },
+        { url: { $exists: true, $nin: [null, ""] } }
+      ]
     },
     {
       projection: {
@@ -1520,6 +1525,21 @@ async function main() {
       await saveNlDetail(detail);
     }
     console.log(JSON.stringify(detail, null, 2));
+    return;
+  }
+
+  // 국립중앙도서관 신착도서: nlNew [YYYYMMDD_YYYYMMDD|all] [pageSize] [maxPages]
+  if (command === "nlNew") {
+    const arg = process.argv[3];
+    const regDate = !arg || arg === "all" ? null : arg;
+    if (regDate && !/^\d{8}_\d{8}$/.test(regDate)) {
+      throw new Error("Usage: node src/index.js nlNew [YYYYMMDD_YYYYMMDD|all] [pageSize] [maxPages]");
+    }
+    const payload = await crawlNlNew(regDate, {
+      pageSize: parsePositiveInt(process.argv[4], 100),
+      maxPages: parsePositiveInt(process.argv[5], Infinity)
+    });
+    console.log(JSON.stringify(payload, null, 2));
     return;
   }
 
