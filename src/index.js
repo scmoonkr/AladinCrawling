@@ -5,7 +5,7 @@ import { fetchAuthorDetail, fetchAuthorListPage, getAuthorAlphabets, getAuthorCa
 import { fetchCallNumberByIsbn } from "./read365.js";
 import { closeKyoboBrowser, crawlKyoboPrice, KyoboRateLimitError } from "./kyobo.js";
 import { crawlNlcyByKdc, crawlNlcyNew, fetchNlcyDetail, fetchNlcyList, saveNlcyDetail } from "./nlcy.js";
-import { crawlNlKdc, crawlNlNew, fetchNlDetail, fetchNlList, saveNlDetail } from "./nl.js";
+import { crawlNlKdc, crawlNlNew, fetchNlDetail, getNlCollection, fetchNlList, saveNlDetail } from "./nl.js";
 import { saveAuthorDetail, saveAuthorList } from "./author-store.js";
 import { saveBookDetail, saveBookList } from "./store.js";
 import { AWARD_TYPES, fetchAwardItems, fetchAwardList } from "./awards.js";
@@ -1044,7 +1044,7 @@ async function runNlcyDetailAllCommand(limit = 5000, skip = 0) {
 
 // nl 컬렉션 중 MARC 미수집 건의 상세를 수집한다
 async function runNlDetailAllCommand(limit = 5000, skip = 0) {
-  const collection = await getCollection("nl");
+  const collection = await getNlCollection();
   const targets = await collection.find(
     { viewKey: { $exists: true }, tags: { $exists: false } },
     { projection: { _id: 1, viewKey: 1, viewType: 1, title: 1 } }

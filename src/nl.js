@@ -12,6 +12,27 @@ const DEFAULT_HEADERS = {
   "accept-language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
 };
 
+// 문서가 수백만 건이라 viewKey 인덱스가 없으면 upsert 마다 전체 스캔이 된다. 최초 1회 보장.
+let nlIndexReady;
+
+export async function getNlCollection() {
+  const collection = await getCollection(NL_COLLECTION);
+
+  if (!nlIndexReady) {
+    nlIndexReady = (async () => {
+      console.log("nl: viewKey 인덱스 확인/생성 중 (처음에는 시간이 걸릴 수 있음)");
+      await collection.createIndex({ viewKey: 1 }, { unique: true, name: "viewKey_1" });
+      await collection.createIndex({ created_at: 1 }, { name: "created_at_1" });
+    })().catch((error) => {
+      nlIndexReady = null;
+      throw error;
+    });
+  }
+
+  await nlIndexReady;
+  return collection;
+}
+
 function normalizeText(value) {
   return String(value ?? "")
     .replace(/ /g, " ")
@@ -179,7 +200,7 @@ export async function fetchNlDetail({ viewKey, viewType = "AH1" }) {
 }
 
 export async function saveNlList(items, { kdc } = {}) {
-  const collection = await getCollection(NL_COLLECTION);
+  const collection = await getNlCollection();
   const now = new Date();
   const operations = items
     .filter((item) => item.viewKey)
@@ -219,7 +240,7 @@ export async function saveNlList(items, { kdc } = {}) {
 }
 
 export async function saveNlDetail(detail) {
-  const collection = await getCollection(NL_COLLECTION);
+  const collection = await getNlCollection();
   const now = new Date();
 
   return collection.updateOne(
@@ -250,14 +271,21 @@ export async function crawlNlKdc(kdc, { pageSize = 100, maxPages = Infinity } = 
   let page = 1;
 
   while (page <= maxPages) {
-    const items = await fetchNlList({ kdc, page, pageSize });
-    console.log(`nl kdc:${kdc} page:${page} items:${items.length}`);
+    // 구간별 소요시간(조회/파싱/저장)을 찍어 어디서 느려지는지 확인한다
+    const t0 = Date.now();
+    const html = await fetchHtml(buildListUrl({ kdc, page, pageSize }));
+    const t1 = Date.now();
+    const items = parseList(html);
+    const t2 = Date.now();
 
     if (items.length === 0) {
+      console.log(`nl kdc:${kdc} page:${page} items:0 (fetch ${t1 - t0}ms)`);
       break;
     }
 
     const result = await saveNlList(items, { kdc });
+    const t3 = Date.now();
+    console.log(`nl kdc:${kdc} page:${page} items:${items.length} (fetch ${t1 - t0}ms, parse ${t2 - t1}ms, save ${t3 - t2}ms, total ${t3 - t0}ms)`);
     db.matchedCount += result.matchedCount;
     db.modifiedCount += result.modifiedCount;
     db.upsertedCount += result.upsertedCount;
@@ -330,7 +358,7 @@ export async function fetchNlNewList({ regDate, page = 1, pageSize = 100 }) {
 }
 
 async function saveNlNewList(items, regDate) {
-  const collection = await getCollection(NL_COLLECTION);
+  const collection = await getNlCollection();
   const now = new Date();
   const operations = items.map((item) => ({
     updateOne: {
