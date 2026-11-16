@@ -134,3 +134,4 @@ node src/index.js nlCrawl 010-019
 node src/index.js nlDetailAll 5000 0
 
 # NL 신착도서
+node src/index.js nlNew 20261102_20261108처럼 쓰고, 뒤에 [pageSize] [maxPages]
