@@ -40,14 +40,37 @@ function normalizeText(value) {
     .trim();
 }
 
-async function fetchHtml(url) {
-  const response = await fetch(url, { headers: DEFAULT_HEADERS });
+// 연결이 ~30초씩 멈추는 현상이 간헐적으로 있어, 짧은 타임아웃 + 재시도로 빨리 끊고 다시 요청한다
+const FETCH_TIMEOUT_MS = 10000;
+const FETCH_RETRIES = 3;
 
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${url} (${response.status})`);
+async function fetchHtml(url) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= FETCH_RETRIES; attempt += 1) {
+    try {
+      const response = await fetch(url, { headers: DEFAULT_HEADERS, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+
+      if (!response.ok) {
+        // 4xx 는 재시도해도 같으므로 바로 실패, 5xx 는 재시도
+        const error = new Error(`Failed to fetch ${url} (${response.status})`);
+        error.retryable = response.status >= 500;
+        throw error;
+      }
+
+      return await response.text();
+    } catch (error) {
+      lastError = error;
+
+      if (error.retryable === false || attempt === FETCH_RETRIES) {
+        break;
+      }
+
+      console.log(`nl: 요청 재시도 ${attempt}/${FETCH_RETRIES - 1} (${error.name === "TimeoutError" ? "타임아웃" : error.message}) ${url}`);
+    }
   }
 
-  return response.text();
+  throw lastError;
 }
 
 function buildListUrl({ kdc, page = 1, pageSize = 100 }) {
@@ -156,12 +179,37 @@ function getSubfield(tags, tagno, sfld) {
   return subfield ? subfield.data : "";
 }
 
+// 상세 ajax 의 #divToc2 에는 전체 목차가 들어 있다("목차 정보 전체보기"는 표시만 펼치는 버튼). 줄바꿈 문자열로 반환.
+export async function fetchNlToc({ viewKey, viewType = "AH1" }) {
+  const url = new URL("/NL/search/nl_detail_view.ajax", NL_BASE_URL);
+  url.searchParams.set("viewKey", String(viewKey));
+  url.searchParams.set("viewType", String(viewType));
+  url.searchParams.set("pageType", "");
+
+  const $ = cheerio.load(await fetchHtml(url.toString()));
+  const $toc = $("#divToc2").first();
+  $toc.find("br").replaceWith("\n");
+
+  return $toc
+    .text()
+    .replace(/ /g, " ")
+    .split("\n")
+    .map((line) => line.replace(/\s+$/g, ""))
+    .filter((line) => line.trim())
+    .join("\n");
+}
+
 export async function fetchNlDetail({ viewKey, viewType = "AH1" }) {
   if (!viewKey) {
     throw new Error("viewKey is required.");
   }
 
-  const $ = cheerio.load(await fetchHtml(buildMarcUrl({ viewType, viewKey })));
+  // MARC 와 목차는 서로 독립이므로 동시에 요청한다
+  const [marcHtml, toc] = await Promise.all([
+    fetchHtml(buildMarcUrl({ viewType, viewKey })),
+    fetchNlToc({ viewKey, viewType })
+  ]);
+  const $ = cheerio.load(marcHtml);
   const leader = normalizeText($("table").first().find("td").first().text());
 
   const tags = $("table").eq(1).find("tbody tr")
@@ -195,7 +243,8 @@ export async function fetchNlDetail({ viewKey, viewType = "AH1" }) {
     ddc: getSubfield(tags, "082", "a") || getSubfield(tags, "052", "a"),
     price: priceDigits ? Number(priceDigits) : null,
     leader,
-    tags
+    tags,
+    toc
   };
 }
 
@@ -256,6 +305,7 @@ export async function saveNlDetail(detail) {
         price: detail.price ?? null,
         leader: detail.leader ?? "",
         tags: Array.isArray(detail.tags) ? detail.tags : [],
+        toc: detail.toc ?? "",
         updated_at: now
       },
       $setOnInsert: { created_at: now }
